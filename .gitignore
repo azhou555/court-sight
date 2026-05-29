@@ -1,0 +1,26 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.env
+
+# Large data / model files
+data/raw/
+data/processed/
+data/interim/
+weights/
+*.pth
+*.pt
+*.onnx
+*.pkl
+
+# Notebooks output
+notebooks/.ipynb_checkpoints/
+
+# OS
+.DS_Store

@@ -1,0 +1,24 @@
+pipeline:
+  fps: 30
+  homography:
+    reestimate_interval: 30          # frames between H re-estimates
+    max_reprojection_error: 0.15     # meters — flag frames above this
+    min_inliers: 4
+  tracking:
+    detection_threshold: 0.5
+    iou_threshold: 0.4
+    velocity_smoothing_window: 7     # Savitzky-Golay window
+  pose:
+    model: "rtmpose-m_8xb256-420e_coco-256x192"
+    confidence_threshold: 0.3
+    pose_quality_threshold: 0.5
+    stroke_window_frames: 30
+    pre_contact_frames: 20
+    post_contact_frames: 10
+  ball:
+    tracknet_weights: "weights/tracknet_v2.pth"
+    detection_threshold: 0.5
+    bounce_velocity_threshold: 0.1   # m/frame
+  alignment:
+    max_dtw_distance: 5.0
+    min_alignment_confidence: 0.4
