@@ -116,11 +116,14 @@ game state.
 ### Core Framework
 
 ```
-EV(shot) = P(make | state) × P(win point | make, state) − P(miss | state)
+EV_adjusted(zone) = P(make | zone) × P(win | make, zone)
+                  − P(miss | zone)
+                  − displacement_penalty
 ```
 
-Shot quality = how the actual shot's EV compares to the maximum available EV
-from the same state. Directly analogous to centipawn loss in chess engines.
+Shot quality has two separable dimensions:
+- **Zone selection score**: EV(actual zone) vs EV(best available zone) — did you pick the right target?
+- **Positioning score**: displacement_penalty — were you in a good position to hit at all?
 
 ### Sub-Models
 
@@ -132,32 +135,48 @@ from the same state. Directly analogous to centipawn loss in chess engines.
 - **Training data:** THETIS + self-collected + CV-extracted from broadcast
 - **Status:** most tractable component, buildable first
 
-#### 2B — Execution Probability Model
+#### 2B — Shot Margin Safety Model
 
-- **Input:** player pose at contact, movement vector, shot type, target margin
-  to nearest line
-- **Output:** P(successful execution)
-- **Training signal:** every shot in every match — it went in or it didn't
-- **Intent:** capture the risk side of the tradeoff
+- **Input:** shot landing geometry (lateral margin, depth margin, net clearance,
+  direction angle), shot type, striker position
+- **Output:** P(make | geometric features) — purely shot selection risk
+- **Architecture:** Gradient Boosted Trees (GBT) with isotonic calibration
+- **Training signal:** binary make/miss; target zone estimated from direction
+  for misses, discarded for shanks
+- **Intent:** capture the geometric risk of the shot choice, cleanly separated
+  from positioning and execution quality
 
 #### 2C — Win Probability Model
 
 - **Input:** rally state (last N shots as structured tokens), player positions,
-  movement vectors
+  movement vectors, next neutral position
 - **Output:** P(win point from this state)
 - **Architecture:** Transformer encoder over rally event sequence
-- **Training:** pretrain on Match Charting Project sequences, fine-tune on
-  CV-extracted positional data
+- **Training:** pretrain on Match Charting Project sequences (with zero-padded
+  position features + mask flag), fine-tune on CV-extracted positional data
 - **Intent:** capture the reward side of the tradeoff
 
 #### 2D — EV Surface
 
-- **Derived from 2B + 2C**
-- For any game state, compute EV across discretized court zones
-  (deep cross, deep line, short cross, short angle, etc.)
-- Produces a heatmap of shot value across the opponent's court
-- Best available shot = argmax over zones
-- Shot quality score = EV(actual) − EV(best available)
+- **Derived from 2B + 2C + 2E**
+- For any game state, compute EV across 9 court zones
+- displacement_penalty is a constant offset — does not change best zone
+  ranking but affects absolute EV scores
+- Shot quality = two scores: zone_score (relative) + displacement_penalty (absolute)
+- Best available shot = argmax over zones of EV base (before penalty)
+
+#### 2E — Neutral Position / Coverage Model
+
+- **Stage 1 — Response distribution:** GBT regressors predicting a 2D Gaussian
+  N(μ_x, μ_y, σ) over where the opponent will land their next shot
+- **Stage 2 — Optimal position:** weighted geometric median of the response
+  distribution via Weiszfeld algorithm, constrained to the reachable set given
+  available recovery time
+- **Displacement penalty:** analytically computed from recovery displacement,
+  body shot flag, momentum misalignment, and contact point deviation by wing
+- **Training:** consecutive shot pairs from processed match records (~8–12k examples)
+- **Serve regime:** simplified lookup for serve + 1 scenarios; default neutral
+  shifted by prior serving pattern frequency
 
 ### State Representation
 
@@ -165,18 +184,19 @@ Each shot event carries:
 
 - Last 2–3 shots in rally (type, direction, landing zone)
 - Striker position + movement vector at contact
+- Striker predicted neutral position at contact (from 2E on previous shot)
+- Striker recovery displacement from neutral
 - Opponent position + movement vector at contact
 - Rally length (shot index in point)
-- Fatigue proxies (cumulative rally distance, recovery speed trend)
 - Court opening metric (how centered/forward each player is)
 
 ### Feedback Output
 
-Rather than binary good/bad, feedback is contextual:
+Feedback is two-dimensional and concrete:
 
-> "From this position (wide, moving away from center), your down-the-line
-> attempt had a 22% estimated execution probability. The highest-value zone
-> from this state was deeper crosscourt with higher margin."
+> "W_deep had significantly higher EV (+0.27) from this state — opponent's
+> backhand side was open. You were also 2.1m from your neutral position at
+> contact (recovery fell 1.1m short), compounding the difficulty of the attempt."
 
 ---
 
@@ -232,10 +252,11 @@ Surface the feedback engine through a usable interface.
 4.  Point boundary detection → video editor (shippable feature)
 5.  Match Charting alignment
 6.  Shot type classifier
-7.  Execution probability model
-8.  Win probability model (Match Charting pretrain)
-9.  EV surface + shot quality scoring
-10. Feedback visualization layer
+7.  Shot margin safety model (2B — GBT on geometric features)
+8.  Neutral position / coverage model (2E — response distribution + geometric median)
+9.  Win probability model (2C — Match Charting pretrain → fine-tune)
+10. EV surface + shot quality scoring (2D — combines 2B + 2C + 2E)
+11. Feedback visualization layer
 ```
 
 ---

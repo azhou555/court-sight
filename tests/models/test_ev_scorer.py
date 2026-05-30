@@ -7,12 +7,12 @@ from src.models.ev_surface.scorer import compute_ev, _get_tier, COURT_ZONES
 
 
 def test_compute_ev_certain_make_high_win():
-    ev = compute_ev(p_make=1.0, p_win_given_make=0.9)
+    ev = compute_ev(p_make=1.0, p_win=0.9)
     assert abs(ev - (1.0 * (0.9 + 1.0) - 1.0)) < 1e-6
 
 
 def test_compute_ev_certain_miss():
-    ev = compute_ev(p_make=0.0, p_win_given_make=0.9)
+    ev = compute_ev(p_make=0.0, p_win=0.9)
     assert abs(ev - (-1.0)) < 1e-6
 
 

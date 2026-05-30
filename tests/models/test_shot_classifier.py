@@ -1,7 +1,7 @@
 """Tests for the shot type classifier model."""
 
-import torch
 import pytest
+torch = pytest.importorskip("torch")
 
 from src.models.shot_classifier.model import ShotClassifierTCN, SHOT_TYPES, STROKE_WINDOW, INPUT_DIM, NUM_CLASSES
 

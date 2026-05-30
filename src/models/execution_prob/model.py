@@ -1,4 +1,4 @@
-"""Execution probability model — XGBoost over biomechanical + context features."""
+"""Shot margin safety model — GBT on geometric features predicting P(make)."""
 
 from __future__ import annotations
 
@@ -6,11 +6,6 @@ from dataclasses import dataclass
 from typing import Optional
 import numpy as np
 
-COURT_ZONES = [
-    "T_deep", "C_deep", "W_deep",
-    "T_mid",  "C_mid",  "W_mid",
-    "T_short","C_short","W_short",
-]
 SHOT_TYPES = [
     "forehand_groundstroke", "backhand_groundstroke",
     "forehand_slice", "backhand_slice",
@@ -20,49 +15,49 @@ SHOT_TYPES = [
 
 
 @dataclass
-class ExecutionProbFeatures:
-    """All features required by the execution probability model."""
-    # Biomechanical state
-    keypoints_normalized: np.ndarray    # (17, 2) hip-centered
-    joint_angles: np.ndarray            # (6,) elbow, shoulder, hip angles
-    movement_vector: np.ndarray         # (2,) m/s
-    balance_metric: float               # lateral displacement from CoM baseline
+class ShotGeometryFeatures:
+    """
+    All geometric features required by the margin safety model.
+    No pose features — purely about the shot's geometric characteristics.
+    """
+    # Shot margin geometry (from ball tracking)
+    lateral_margin_m: float        # distance from landing x to nearest sideline
+    depth_margin_m: float          # distance from landing y to nearest baseline
+    net_clearance_m: float         # estimated ball height above net at crossing
+    shot_direction_deg: float      # angle relative to court long axis (0=straight, 90=cross)
+    landing_x: float               # continuous court x coordinate
+    landing_y: float               # continuous court y coordinate
 
-    # Shot context
+    # Shot and position context
     shot_type: str
-    target_zone: str
-    distance_to_sideline: float         # meters
-    distance_to_net: float              # meters (depth of target)
-    player_x_position: float            # meters from center
-    player_y_position: float            # meters from baseline
+    striker_y_m: float             # striker's court depth
+    striker_x_m: float             # striker's lateral position
+    incoming_depth_m: float        # how deep the incoming ball was
 
-    # Rally context
-    incoming_ball_speed_rel: float      # relative to player average
-    rally_length: int                   # shot index in point
+    # Miss estimation flag
+    target_zone_estimated: bool = False   # True if target zone was imputed
 
     def to_vector(self) -> np.ndarray:
-        shot_onehot = np.eye(len(SHOT_TYPES))[SHOT_TYPES.index(self.shot_type)]
-        zone_onehot = np.eye(len(COURT_ZONES))[COURT_ZONES.index(self.target_zone)]
+        type_onehot = np.eye(len(SHOT_TYPES))[SHOT_TYPES.index(self.shot_type)]
         return np.concatenate([
-            self.keypoints_normalized.ravel(),          # 34
-            self.joint_angles,                          # 6
-            self.movement_vector,                       # 2
-            [self.balance_metric],                      # 1
-            shot_onehot,                                # 10
-            zone_onehot,                                # 9
-            [self.distance_to_sideline],                # 1
-            [self.distance_to_net],                     # 1
-            [self.player_x_position],                   # 1
-            [self.player_y_position],                   # 1
-            [self.incoming_ball_speed_rel],             # 1
-            [self.rally_length / 30.0],                 # 1 (normalized)
-        ])                                              # total: 68
+            [self.lateral_margin_m],
+            [self.depth_margin_m],
+            [self.net_clearance_m],
+            [self.shot_direction_deg / 90.0],    # normalized
+            [self.landing_x / 4.115],            # normalized to [-1, 1]
+            [self.landing_y / 23.77],            # normalized to [0, 1]
+            type_onehot,                          # 10
+            [self.striker_y_m / 23.77],
+            [self.striker_x_m / 4.115],
+            [self.incoming_depth_m / 23.77],
+        ])                                        # total: ~20 features
 
 
-class ExecutionProbModel:
+class ShotSafetyModel:
     """
-    Gradient-boosted trees model estimating P(make | biomechanical state, shot context).
-    Wraps XGBoost with isotonic regression calibration.
+    GBT model estimating P(make | geometric shot features).
+    Captures shot selection risk — geometric margin and placement difficulty.
+    Positioning risk is computed separately in the displacement penalty.
     """
 
     def __init__(self, model_path: Optional[str] = None):
@@ -71,7 +66,7 @@ class ExecutionProbModel:
         if model_path:
             self.load(model_path)
 
-    def predict(self, features: ExecutionProbFeatures) -> dict:
+    def predict(self, features: ShotGeometryFeatures) -> dict:
         if self._model is None:
             raise RuntimeError("Model not loaded. Call load() or train() first.")
         x = features.to_vector().reshape(1, -1)
@@ -83,6 +78,10 @@ class ExecutionProbModel:
         return {
             "p_make": calibrated,
             "p_miss": 1.0 - calibrated,
+            "lateral_margin_m": features.lateral_margin_m,
+            "depth_margin_m": features.depth_margin_m,
+            "net_clearance_m": features.net_clearance_m,
+            "target_zone_estimated": features.target_zone_estimated,
         }
 
     def train(self, X: np.ndarray, y: np.ndarray) -> None:
@@ -90,9 +89,8 @@ class ExecutionProbModel:
         raise NotImplementedError
 
     def load(self, path: str) -> None:
-        # TODO: load XGBoost model + calibrator from disk
+        # TODO: load XGBoost model + calibrator
         raise NotImplementedError
 
     def save(self, path: str) -> None:
-        # TODO: persist model + calibrator
         raise NotImplementedError

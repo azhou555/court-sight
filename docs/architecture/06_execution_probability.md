@@ -1,132 +1,132 @@
-# Execution Probability Model (Model 2B)
+# Shot Margin Safety Model (Model 2B)
 
 ## Purpose
 
-Estimate P(successful execution | player state, shot type, target zone) —
-the probability that a player makes the shot they're attempting given their
-physical situation at contact. This is the **risk** side of the EV equation.
+Estimate P(make | shot geometry, shot type) — the probability a shot lands in
+court given the geometric characteristics of the attempt and where it is aimed.
+This is the **risk side** of the EV equation.
 
-## Why This Matters
+## Key Design Principle
 
-A player attempting a down-the-line winner while stretched wide and off-balance
-has a fundamentally different execution probability than the same shot from a
-neutral, centered position. The execution probability model captures this
-relationship so that risky shot choices in difficult physical states are
-penalized appropriately regardless of their strategic value.
+This model captures **shot selection risk**: is the player choosing a margin
+that is geometrically likely to succeed from their position? It does NOT model
+execution quality (contact mechanics, timing errors). That component is captured
+separately in the displacement penalty term applied at the EV layer.
 
-## Training Signal
+The training signal — ball went in or didn't — is now clean for this purpose.
+The features are purely geometric, so the model learns margin effects without
+confounding from biomechanical noise.
 
-Unlike win probability, execution probability has a clean, abundant binary
-training signal: **every shot either goes in or it doesn't**. This is a
-supervised classification problem with no labeling cost beyond what the
-pipeline already produces.
+## Features
 
-```
-for each shot_event:
-    outcome = 1 if ball landed in court else 0
-    features = {player_pose, movement_vector, shot_type, target_zone}
-    # →  binary cross-entropy supervision
-```
+All features are directly observable from ball tracking + shot classifier.
+No pose features.
 
-## Input Features
+### Shot Geometry
 
-### Biomechanical State at Contact (most important features)
+| Feature | Description |
+|---|---|
+| `lateral_margin_m` | Distance from landing x to nearest sideline (meters) |
+| `depth_margin_m` | Distance from landing y to nearest baseline (meters) |
+| `net_clearance_m` | Estimated ball height at net crossing (from trajectory arc) |
+| `shot_direction_deg` | Angle relative to court long axis — crosscourt bonus emerges naturally |
+| `landing_x`, `landing_y` | Continuous court coordinates of landing point |
 
-| Feature                          | Description                                              |
-|----------------------------------|----------------------------------------------------------|
-| Pose keypoints (normalized)      | 17×2 joint positions relative to hip midpoint           |
-| Joint angles                     | Elbow angle, shoulder rotation, hip tilt, knee bend      |
-| Movement vector                  | (vx, vy) in m/s — direction and speed of movement       |
-| Balance metric                   | Lateral displacement from center of mass baseline        |
-| Recovery direction               | Moving toward center vs. away — proxy for recovery ease  |
+### Shot and Position Context
 
-### Shot Context
+| Feature | Description |
+|---|---|
+| `shot_type` | One-hot: forehand / backhand / slice / volley / serve |
+| `striker_y_m` | Striker's court depth — at net vs. baseline changes viable margins |
+| `striker_x_m` | Lateral position — wide position constrains available angles |
+| `incoming_depth_m` | How deep the incoming ball was — deeper = less time, tighter margins |
 
-| Feature                          | Description                                              |
-|----------------------------------|----------------------------------------------------------|
-| Shot type (one-hot)              | From shot type classifier                                |
-| Target zone (one-hot)            | 9-zone grid on opponent's court                          |
-| Distance to target sideline      | Clearance margin — smaller = higher risk                 |
-| Distance to net                  | Depth of target — shorter = higher net clearance needed  |
-| Player court position            | Distance from center baseline, lateral displacement      |
+### Target Zone Estimation for Misses
 
-### Rally Context
+For shots that land out:
 
-| Feature                          | Description                                              |
-|----------------------------------|----------------------------------------------------------|
-| Incoming ball speed (relative)   | Fast incoming ball reduces execution probability          |
-| Incoming ball direction          | On-the-run vs. comfortable position                      |
-| Rally length                     | Proxy for fatigue accumulation                           |
+- **Small misses** (out by < 0.5m lateral or < 1m depth): ball direction and
+  trajectory arc give a reliable estimate of the intended landing zone.
+  Assign the nearest in-bounds zone as a soft label with a confidence weight
+  proportional to proximity.
 
-## Architecture
+- **Shanks** (ball direction implausible for the declared shot type, e.g.,
+  forehand traveling sideways): discard from training. Expected to be rare
+  in broadcast pro footage.
 
-### Gradient Boosted Trees (Primary)
+For makes: `landing_zone = target_zone` directly.
 
-Tabular features → **XGBoost** or **LightGBM**. Reasons:
-- Tabular data with mixed feature types (continuous + categorical)
-- Interpretable feature importance
-- Calibration: well-calibrated probabilities out of the box after isotonic
-  regression post-processing
-- Fast inference at serving time
+## Architecture: Gradient Boosted Trees
+
+**Why GBT over MLP here:**
+- Features are tabular and independently structured — no spatial relationships
+  between features that MLP would exploit
+- At 10k–15k training examples, GBT reaches reliable calibration faster
+- Calibration is critical — the EV formula requires well-calibrated
+  probabilities, not just ranked scores. GBT + isotonic regression
+  consistently outperforms MLP on ECE at this scale
+- Feature importance is interpretable, allowing direct validation
+  (lateral margin should dominate, serve type should have low importance, etc.)
 
 ```python
 model = XGBClassifier(
     n_estimators=500,
-    max_depth=6,
+    max_depth=5,
     learning_rate=0.05,
     subsample=0.8,
     colsample_bytree=0.8,
     objective="binary:logistic",
     eval_metric="logloss",
 )
+# Post-fit: isotonic regression calibration on held-out split
 ```
 
-### Neural Network Alternative
+## Training Data
 
-If the GBT underfits non-linear biomechanical interactions:
+Every shot in every processed match is a training example:
+- Input: geometric features at landing + shot type + striker position
+- Label: 1 (ball in court) or 0 (out) — with soft zone estimate for small misses
 
-```
-Input: concatenated feature vector (∼80 dims)
-    │
-    ├── MLP: 256 → 128 → 64
-    │       Each layer: Linear → BatchNorm → ReLU → Dropout(0.3)
-    │
-    └── Linear(1) → sigmoid → P(make)
-```
-
-## Probability Calibration
-
-Raw classifier outputs are calibrated using isotonic regression on a held-out
-calibration set. Calibration is critical — the downstream EV computation
-requires well-calibrated probabilities, not just ranked scores.
-
-Evaluate calibration with reliability diagrams and Expected Calibration Error
-(ECE). Target ECE < 0.05.
+With 30–50 matches (~12k–15k shots post-filtering), this gives adequate
+coverage across shot types and margin profiles.
 
 ## Evaluation
 
-Primary metrics:
-- **Brier score**: proper scoring rule for probability accuracy
-- **ECE**: calibration quality
-- **AUC-ROC**: discrimination ability
-- **Conditional accuracy**: breakdown by shot type, player position zone,
-  balance state — catch any systematic biases
+| Metric | Target |
+|---|---|
+| Brier score | < 0.18 |
+| ECE | < 0.04 |
+| AUC-ROC | > 0.75 |
+| Lateral margin feature rank | Top 3 by SHAP importance |
 
-## Output
+Validate conditional accuracy by shot type and lateral margin bucket —
+catches any systematic bias (e.g., model underestimating miss rate on slice DTL).
+
+## Displacement Penalty
+
+The positioning component of shot safety is computed analytically as a
+separate term in the EV formula. It is NOT a feature in this model.
+See `08_ev_surface.md` for the penalty definition and `10_neutral_position.md`
+for the neutral position computation it depends on.
+
+## Output Schema
 
 ```python
-ExecutionProbResult = {
+ShotSafetyResult = {
     "shot_id": str,
-    "p_make": float,                  # calibrated probability
-    "p_miss": float,                  # = 1 - p_make
-    "feature_importances": dict,      # top contributing features (SHAP values)
-    "confidence_interval": [float, float],   # bootstrap 90% CI
+    "p_make": float,              # calibrated probability
+    "p_miss": float,              # = 1 - p_make
+    "lateral_margin_m": float,
+    "depth_margin_m": float,
+    "net_clearance_m": float,
+    "target_zone_estimated": bool,  # True if target zone was imputed (miss)
 }
 ```
 
 ## Key Dependencies
 
-- XGBoost / LightGBM
-- scikit-learn (calibration, evaluation)
-- SHAP (feature importance / explainability)
-- NumPy, Pandas
+- XGBoost
+- scikit-learn (isotonic calibration, evaluation)
+- SHAP (feature importance validation)
+- Ball tracking output (landing coordinates, trajectory arc)
+- Shot type classifier output
