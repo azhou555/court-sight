@@ -4,114 +4,149 @@
 
 The Match Charting Project (MCP) provides shot-level labels (type, direction,
 outcome) for thousands of professional matches. The pipeline aligns these
-labels to the CV-extracted positional data (player positions, pose, ball
-trajectory) to produce fully annotated shot records.
+labels to the CV-extracted positional data (player positions, ball trajectory)
+to produce fully annotated shot records for downstream model training.
 
-## Match Charting Project Format
+## MCP CSV Format
 
-MCP stores data as CSV files with one row per shot:
+MCP stores data as one CSV row per **point** (not per shot). The key columns:
 
 ```
-match_id, set, game, point, shot_in_rally, server, shot_type, direction,
-depth, outcome, ...
+match_id, Pt, Set1, Set2, Gm1, Gm2, Pts, Svr, 1st, 2nd, Notes, PtWinner
 ```
 
-Shot type codes (subset):
-- `f` = forehand, `b` = backhand, `s` = slice, `v` = volley
-- `r` = serve (first), `q` = serve (second)
-- `o` = overhead
+- `1st` — shot string for first-serve rally (empty if first serve faulted)
+- `2nd` — shot string for second-serve rally (empty if first serve was in)
+- `Svr` — 1 or 2 (which player is serving)
+- `PtWinner` — 1 or 2
 
-Direction codes:
-- `1` = down the line, `2` = crosscourt, `3` = middle, `4` = inside-in, etc.
+### Shot String Encoding
+
+Each shot string is a compact sequence encoding the entire rally:
+
+```
+4b38f1r2f-1l1o1*
+```
+
+| Token     | Meaning                                              |
+|-----------|------------------------------------------------------|
+| `4`       | Serve: 4=wide, 5=body, 6=T                           |
+| `f` / `b` | Shot type: f=forehand, b=backhand, r=FH slice, etc.  |
+| `-` / `+` | Position modifier: `-`=at-net, `+`=approach          |
+| `1-3`     | Direction: 1=DTL, 2=CC/middle, 3=opposite-DTL        |
+| `7-9`     | Depth (optional): 7=shallow, 8=mid, 9=deep           |
+| `*`/`@`/`#`/`nwdx` | Outcome (terminal): winner / UE / FE / miss type |
+
+The full shot type alphabet: `f b r s v z l o j k y p q`
+(forehand, backhand, fh-slice, bh-slice, volley, bh-volley, lob, overhead,
+fh-swing-volley, bh-swing-volley, tweener, fh-drop, bh-drop)
+
+Semicolons `;` are contributor-inserted separators and are stripped.
+
+### Rally Length Convention
+
+`rally_len` = number of shots **including serve**, **excluding the error shot**.
+- Ace: `4*` → rally_len = 1
+- Serve + return + error: `4f27f3d@` → rally_len = 2 (serve + return; f3 error excluded)
 
 ## Alignment Strategy
 
-The core challenge: MCP timestamps are at the point level (set/game/point
-counts), while video is at the frame level. We need to map each shot row in
-MCP to a specific frame range in the video.
+### Step 1 — Contact Detection
 
-### Step 1 — Point Boundary Detection
+From ball tracking (`BallTrackResult.trajectory_segment`): each segment
+increment marks a court bounce, after which the opponent hits the next shot.
+The first frame of each trajectory segment ≈ the corresponding contact frame.
 
-Detect point start and end frames from the video:
-- **Point start**: serve detected (ball toss from behind baseline, player
-  stationary)
-- **Point end**: dead-ball state (players stationary, ball out of play, visible
-  score update, or crowd reaction pattern)
+Contact count per video point ≈ rally length (within ±1 for error shots).
 
-This produces a list: `[(start_frame, end_frame, point_score)]`
+### Step 2 — Point-Level Alignment (DTW over Rally Lengths)
 
-### Step 2 — Score Alignment
+Match the sequence of video points to MCP rows using DTW over rally-length
+sequences. This handles:
 
-The video's detected score sequence is aligned to the MCP score sequence using
-dynamic time warping (DTW) or simple edit-distance alignment. Score changes are
-the alignment anchors.
+- **Broadcast cuts** — MCP rows without a corresponding video point
+- **Replays** — video points that duplicate MCP entries
+- **Misdetections** — single-point rally count errors (±1 tolerance)
 
-This handles:
-- Broadcast replays (which duplicate point footage)
-- Commentary segments between games
-- Warm-up footage at the start of recordings
+Score-based alignment (scoreboard OCR) is deferred. Rally-length DTW is
+sufficient for unedited or lightly-edited broadcast footage.
 
-### Step 3 — Shot-level Alignment within Points
+**DTW cost:** `|cv_contact_count − mcp_rally_len|`
 
-Within a matched point, align individual shots using:
-1. MCP rally length (shot count) vs. detected shot count from ball tracking
-2. Serve shot is always shot 1 — align the serve detection as shot 1
-3. Subsequent shots: assign each ball-tracking-detected contact event to the
-   next MCP shot row in sequence
+**Alignment confidence:** `1.0 − cost / max(rally_len, 1)`
 
-Edge cases:
-- **Extra shots detected**: ball-tracking false positives. If CV detects more
-  shots than MCP records, drop the lowest-confidence detections.
-- **Missing shots**: a shot was missed by ball tracking. Interpolate using
-  player contact frame (minimum distance between player position and ball
-  trajectory).
+A manual alignment override file can be supplied to fix anchor points when
+DTW fails on heavily-edited footage (future feature).
+
+### Step 3 — Shot-Level Assignment Within Points
+
+Within each matched point:
+1. Contacts are zipped with MCP shot tokens in order (serve = index 0).
+2. Server role is inferred from ball y-position at the first contact:
+   `y < net_y → near player serving, y ≥ net_y → far player serving`.
+3. Shots alternate between striker/receiver starting from the server.
+4. Excess contacts (more CV than MCP) → extras dropped.
+5. Missing contacts (fewer CV than MCP) → unmatched MCP shots skipped.
 
 ### Step 4 — Quality Filtering
 
-An aligned shot is marked high-confidence if:
-- The point was matched to MCP with DTW distance < threshold
-- The shot-level timing is consistent (inter-shot intervals plausible for
-  rally pace)
-- Pose confidence > 0.5 for the striker at contact frame
-- Ball tracking confidence > 0.4 at contact frame
+`alignment_confidence` encodes per-point quality:
+- 1.0 — exact rally count match
+- 0.5 — off by half the rally length
+- 0.0 — completely mismatched
 
-Low-confidence shots are retained but down-weighted during training.
+Low-confidence records are retained in the output but should be downweighted
+during training.
 
-## Output: Unified Shot Record
+## Output: ShotRecord
 
 ```python
-ShotRecord = {
-    # From Match Charting Project
-    "match_id": str,
-    "point_id": str,               # set-game-point-shot
-    "shot_in_rally": int,
-    "shot_type_mcp": str,
-    "direction_mcp": str,
-    "depth_mcp": str,
-    "point_outcome": int,          # 1 = point won by striker, 0 = lost
+@dataclass
+class ShotRecord:
+    # From MCP
+    match_id: str
+    point_id: str           # "{match_id}_{pt}_{shot_idx}"
+    shot_in_rally: int
+    shot_type_mcp: str      # e.g. 'f', 'b', 'serve'
+    direction_mcp: str      # '1', '2', '3' or ''
+    depth_mcp: str          # '7', '8', '9' or ''
+    point_outcome: int      # 1 = striker won, 0 = lost
 
-    # From CV pipeline
-    "contact_frame": int,
-    "striker_role": str,           # "near" or "far"
-    "striker_position_m": [float, float],
-    "striker_velocity_ms": [float, float],
-    "striker_pose": list,          # (17, 2) keypoints in court meters
-    "striker_pose_confidence": float,
-    "opponent_position_m": [float, float],
-    "opponent_velocity_ms": [float, float],
-    "ball_landing_zone": str,
-    "ball_contact_position_m": [float, float],
+    # From CV
+    contact_frame: int
+    striker_role: str       # "near" or "far"
+    striker_position_m: list
+    striker_velocity_ms: list
+    opponent_position_m: list
+    opponent_velocity_ms: list
+    ball_landing_zone: Optional[str]
+    ball_contact_position_m: Optional[list]
+
+    # Pose (populated when RTMPose step is implemented)
+    striker_pose: Optional[list] = None   # (17, 2) keypoints in court meters
+    striker_pose_confidence: float = 0.0
 
     # Derived
-    "rally_context": list,         # last 3 ShotRecord summaries
-    "alignment_confidence": float,
-    "pose_quality": float,
-}
+    rally_context: list = field(default_factory=list)
+    alignment_confidence: float = 0.0
+    pose_quality: float = 0.0
 ```
+
+## Known Limitations
+
+- **Score-based alignment not implemented**: Rally-length DTW is a proxy.
+  Heavily-edited broadcasts (match highlights, truncated recordings) may
+  produce poor alignment. Score OCR is the planned fix.
+- **Pose fields are empty in V1**: `striker_pose` is `None` until RTMPose
+  is integrated.
+- **Server role is heuristic**: Ball y-position at serve contact infers
+  who is serving; rare camera angles or occlusions can flip this.
+- **Contact timing is approximate**: Trajectory-segment boundaries overcount
+  by 1 for error shots (no ±0 correction applied per shot).
 
 ## Key Dependencies
 
-- Pandas (MCP CSV loading, join operations)
-- SciPy (DTW via `scipy.spatial.distance.cdist` + custom DTW)
-- NumPy
-- MCP dataset: https://github.com/JeffSackmann/tennis_MatchChartingProject
+- `pandas>=2.2` — MCP CSV loading
+- `numpy>=1.26` — DTW DP matrix
+- Existing pipeline outputs: `BallTrackResult`, `PlayerTrackResult`,
+  `PointSegment`
