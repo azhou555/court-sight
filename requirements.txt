@@ -42,3 +42,8 @@ pytest>=8.1
 pytest-cov>=5.0
 ruff>=0.4
 mypy>=1.9
+
+# Dataset access (dev only — not needed at inference time)
+huggingface_hub>=0.22
+datasets>=2.19
+gdown>=5.1
