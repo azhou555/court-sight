@@ -7,74 +7,104 @@ match, and compute position and velocity in court-meter coordinates.
 
 ## Detection
 
-Use a fine-tuned **YOLOv8** person detector. The tennis-specific context
-means:
-- Exactly 2 players in frame (or 1 if only one side of court is shown)
-- Players are distinguishable by court half (near vs. far baseline)
-- Ball boys/girls are present — suppress detections outside the court area
-  using the homography mask from the homography pipeline
+Use **YOLO26m** for person detection. YOLO26 is the current default Ultralytics
+model (as of v8.4), featuring NMS-free end-to-end inference and the MuSGD
+optimizer — comparable accuracy to YOLO11m (~51.5% mAP COCO) with faster CPU
+inference.
 
-Detection confidence threshold: 0.5. Non-maximum suppression IoU threshold: 0.4.
+- Class filter: person only (class 0)
+- Confidence threshold: 0.5
+- Court mask: suppress detections where the foot point (bbox bottom-center)
+  projects outside the court boundary + 3m margin (catches ball boys behind
+  the baseline and line judges at the sides)
+- Pretrained COCO weights used initially; fine-tune on broadcast tennis footage
+  if false-positive rate on ball boys/line judges is unacceptable
 
 ## Tracking
 
-Use **ByteTrack** for multi-object tracking. ByteTrack handles low-confidence
-detections (partially occluded players) better than SORT-family trackers.
+Use **BoT-SORT** (via BoxMOT) in motion-only mode (`with_reid=False`).
+
+BoT-SORT extends ByteTrack with **global motion compensation (GMC)** using ECC
+(Enhanced Correlation Coefficient) optical flow, which explicitly corrects for
+broadcast camera pan and tilt during rallies. This is the key improvement over
+ByteTrack for broadcast footage.
+
+ReID features are omitted — with exactly 2 players distinguishable by court
+half, the added accuracy does not justify the overhead of downloading and
+running a ReID model.
+
+Configuration:
+```python
+BotSort(
+    with_reid=False,
+    cmc_method='ecc',      # camera motion compensation via optical flow
+    frame_rate=30,
+    track_high_thresh=0.5,
+    new_track_thresh=0.6,
+    track_buffer=30,       # frames to keep a lost track alive
+)
+```
 
 Track assignment to "near player" / "far player" roles:
-- Project player centroid through H to court coordinates
-- Assign role based on Y coordinate (< 11.88m = near side, > 11.88m = far side)
-- Re-assign roles each frame to handle camera flip edits
+- Project player foot point through H to court coordinates
+- Assign role based on Y coordinate (< 11.885m = near side, ≥ 11.885m = far side)
+- Re-assign roles each frame to handle camera-flip edits
 
 ## Position and Velocity
 
-Player position = court-coordinate centroid of bounding box bottom edge
-(feet contact point is more stable than box center, which shifts with
-arm/racket position).
+**Position**: court-coordinate projection of the bbox bottom-center (foot
+contact point). More stable than box center, which shifts with arm/racket pose.
+
+**Velocity**: Savitzky-Golay filter (window=7, poly=2) over the rolling position
+history, differentiated at the last point. Falls back to 3-frame finite
+difference until 7 frames of history are available.
 
 ```python
-def pixel_to_court(pixel_pt, H):
-    pt = np.array([*pixel_pt, 1.0], dtype=np.float64)
-    court_pt = H @ pt
-    return court_pt[:2] / court_pt[2]  # perspective divide
-```
+from scipy.signal import savgol_filter
 
-Velocity = finite difference of position over 3-frame window, smoothed with
-a Savitzky-Golay filter (window=7, poly=2) to reduce jitter.
+deriv = savgol_filter(positions, window=7, polyorder=2, deriv=1, delta=dt, axis=0)
+velocity_ms = deriv[-1]   # m/s at most recent frame
+```
 
 ## Player Identity
 
-Within a match, maintain two persistent track identities. On camera cuts:
-- Detect cut using frame-difference spike or homography re-initialization flag
-- Re-match tracks to roles using court position after cut
+Two persistent track IDs per match. On camera cuts (detected via homography
+re-initialization flag from the homography pipeline):
+- Clear position history for both tracks
+- Re-match track IDs to near/far roles using court position on the next frame
 
 ## Output Schema
 
 ```python
-PlayerTrackResult = {
-    "frame_idx": int,
-    "near_player": {
-        "track_id": int,
-        "bbox_px": [x1, y1, x2, y2],
-        "position_m": [x, y],           # court meters
-        "velocity_ms": [vx, vy],         # m/s
-        "confidence": float,
-    },
-    "far_player": { ... },               # same structure
-}
+@dataclass
+class PlayerState:
+    track_id: int
+    bbox_px: np.ndarray        # [x1, y1, x2, y2] in original frame pixels
+    position_m: np.ndarray     # [x, y] court meters (foot contact point)
+    velocity_ms: np.ndarray    # [vx, vy] m/s
+    confidence: float
+
+@dataclass
+class PlayerTrackResult:
+    frame_idx: int
+    near_player: Optional[PlayerState]
+    far_player: Optional[PlayerState]
 ```
 
 ## Known Challenges
 
-- **Occlusion by net**: near-baseline rallies occasionally have players
-  partially behind the net. ByteTrack's re-ID handles short occlusions.
-- **Ball boy interference**: suppress detections in fixed boundary zones
-  (corners behind baselines).
-- **Doubles matches**: out of scope for V1 — skip doubles footage in dataset
-  collection.
+- **Occlusion by net**: ByteTrack / BoT-SORT re-ID handles short occlusions
+  via the track buffer (30 frames).
+- **Ball boy suppression**: Court mask handles most cases; edge cases (ball boy
+  running onto court) will produce a spurious detection but role assignment
+  limits it to whichever side has fewer than 2 players.
+- **Doubles footage**: Out of scope for V1 — skip doubles footage during
+  dataset collection.
+- **Frame rate variation**: Some broadcast clips run at 25fps. Pass the actual
+  frame rate to `BotSort(frame_rate=fps)` and the velocity `delta` parameter.
 
 ## Key Dependencies
 
-- Ultralytics YOLOv8 (`ultralytics` package)
-- ByteTrack (standalone or via BoxMOT)
-- NumPy + SciPy (Savitzky-Golay smoothing)
+- `ultralytics>=8.4` (YOLO26m)
+- `boxmot>=10.0` (BotSort)
+- `scipy` (Savitzky-Golay filter)

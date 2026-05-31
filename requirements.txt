@@ -15,6 +15,7 @@ mmcv>=2.1
 # Deep learning
 torch>=2.2
 torchvision>=0.17
+ultralytics>=8.4       # YOLO26 support
 
 # Gradient boosted trees
 xgboost>=2.0
