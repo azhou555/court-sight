@@ -147,8 +147,7 @@ class BallTracker:
         intensity = out.argmax(dim=1).cpu().numpy()[0]  # (H×W,)
         intensity = intensity.reshape(INPUT_H, INPUT_W).astype(np.float32)
 
-        # Normalise and extract ball via HoughCircles (same as reference impl)
-        heatmap = (intensity * (255.0 / 255.0)).astype(np.uint8)
+        heatmap = intensity.astype(np.uint8)
         _, binary = cv2.threshold(heatmap, 127, 255, cv2.THRESH_BINARY)
         circles = cv2.HoughCircles(
             binary,
@@ -160,17 +159,23 @@ class BallTracker:
             minRadius=2,
             maxRadius=7,
         )
-        if circles is None or len(circles[0]) != 1:
+        if circles is None:
             return None, 0.0
 
-        cx, cy = circles[0][0][:2]
-        # Confidence: normalised peak intensity at detected location
-        confidence = float(intensity[int(cy), int(cx)]) / 255.0
+        # When multiple candidates are found, pick the one with the highest
+        # centre intensity — the true ball position has the brightest Gaussian peak.
+        best_cx, best_cy, best_conf = 0.0, 0.0, 0.0
+        for cx, cy, _ in circles[0]:
+            c = float(intensity[int(cy), int(cx)]) / 255.0
+            if c > best_conf:
+                best_cx, best_cy, best_conf = cx, cy, c
 
-        # Scale back to original frame resolution
+        if best_conf == 0.0:
+            return None, 0.0
+
         sx = orig_w / INPUT_W
         sy = orig_h / INPUT_H
-        return np.array([cx * sx, cy * sy], dtype=np.float64), confidence
+        return np.array([best_cx * sx, best_cy * sy], dtype=np.float64), best_conf
 
     def _extrapolate(self, frame_idx: int) -> np.ndarray:
         """Constant-velocity prediction from last 2 confirmed detections."""
@@ -201,12 +206,17 @@ class BallTracker:
 def _preprocess(
     frames: tuple[np.ndarray, np.ndarray, np.ndarray]
 ) -> torch.Tensor:
-    """Stack 3 BGR frames into a (1, 9, 360, 640) float tensor."""
+    """Stack 3 BGR frames into a (1, 9, 360, 640) float tensor.
+
+    Frame order: [current, prev, prev-prev] matching the yastrebksv/TrackNet
+    training convention.  Frames are kept in BGR (no RGB conversion) to match
+    the pretrained checkpoint.
+    """
+    pp, prev, curr = frames  # input tuple is (prev-prev, prev, current)
     channels = []
-    for f in frames:
+    for f in [curr, prev, pp]:   # current-first as expected by the checkpoint
         f_resized = cv2.resize(f, (INPUT_W, INPUT_H))
-        f_rgb = cv2.cvtColor(f_resized, cv2.COLOR_BGR2RGB)
-        channels.append(f_rgb.astype(np.float32) / 255.0)
+        channels.append(f_resized.astype(np.float32) / 255.0)
     stacked = np.concatenate(channels, axis=2)          # (360, 640, 9)
     tensor = torch.from_numpy(stacked).permute(2, 0, 1) # (9, 360, 640)
     return tensor.unsqueeze(0)                           # (1, 9, 360, 640)

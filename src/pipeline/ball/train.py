@@ -109,11 +109,12 @@ class BallTrackDataset(Dataset):
         mx = int(bx * INPUT_W / orig_w)
         my = int(by * INPUT_H / orig_h)
 
+        # Frame order: [current, prev, prev-prev] — matches TrackNet checkpoint convention.
+        # paths = [prev-prev, prev, current], so reverse for stacking.
         channels = []
-        for f in frames:
+        for f in [frames[2], frames[1], frames[0]]:
             f_r = cv2.resize(f, (INPUT_W, INPUT_H))
-            f_rgb = cv2.cvtColor(f_r, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-            channels.append(f_rgb)
+            channels.append(f_r.astype(np.float32) / 255.0)  # keep BGR, no RGB conversion
 
         if self.augment:
             channels, mx, my = _augment(channels, mx, my)

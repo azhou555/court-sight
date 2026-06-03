@@ -89,15 +89,14 @@ class BoundaryDetector:
 
         if self._state is _State.DEAD:
             if ball_visible:
-                self._dead_counter += 1
+                # Ball appeared: if enough dead time preceded this, it's a serve.
                 if self._dead_counter >= self.dead_min_frames:
-                    # Enough dead time has passed — this ball appearance is a serve
                     self._state = _State.LIVE
                     self._live_start_frame = frame_idx
                     self._last_live_frame = frame_idx
                     self._dead_counter = 0
             else:
-                self._dead_counter = 0
+                self._dead_counter += 1  # count frames with no ball
 
         elif self._state is _State.LIVE:
             if ball_visible:
