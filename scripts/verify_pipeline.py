@@ -295,7 +295,7 @@ def main() -> None:
                 f"  ● Point {completed.point_id}: "
                 f"{completed.start_sec:.1f}s – {completed.end_sec:.1f}s  ({dur:.1f}s)"
             )
-            border_color = _C_LIVE
+            border_color = _C_STATE["LIVE"]
             border_ttl   = _BORDER_TTL
 
         # Decay border flash
