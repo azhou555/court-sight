@@ -6,19 +6,19 @@ Extract 17-keypoint body pose for each player at each frame and project
 those keypoints into court-meter coordinates. Pose is the primary biomechanical
 input to both the shot type classifier and the execution probability model.
 
-## Model: RTMPose
+## Model: YOLO26-pose (V1)
 
-**RTMPose** (Real-Time Multi-Person Pose Estimation) is chosen over
-alternatives for the following reasons:
+**Implementation uses `yolo26m-pose.pt`** (Ultralytics) instead of the
+originally planned RTMPose, to avoid the mmpose/mmcv dependency stack.
+Same COCO-17 keypoint schema; ~3-4 AP lower than RTMPose-m but sufficient
+for shot classification. Upgrade to RTMPose-m if joint accuracy becomes a
+bottleneck.
 
-| Model         | Speed (fps) | Accuracy (AP) | Notes                          |
-|---------------|-------------|---------------|--------------------------------|
-| RTMPose-m     | ~90fps      | 75.8 AP       | Best speed/accuracy tradeoff   |
-| ViTPose-B     | ~30fps      | 77.1 AP       | More accurate, slower          |
-| OpenPose      | ~15fps      | 68.2 AP       | Outdated, kept for reference   |
-
-Target: **RTMPose-m** for pipeline speed. Upgrade to RTMPose-l if inference
-hardware allows (≥ RTX 3080).
+| Model         | COCO AP | Notes                              |
+|---------------|---------|------------------------------------|
+| YOLO26m-pose  | ~72     | Already in stack, no new deps ✓    |
+| RTMPose-m     | 75.8    | Best tradeoff — future upgrade     |
+| ViTPose-B     | 77.1    | More accurate, heavier             |
 
 ## Keypoint Schema (COCO 17-point)
 
