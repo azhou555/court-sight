@@ -23,7 +23,7 @@ def test_pixel_to_court_scale():
 
 
 def test_court_keypoints_shape():
-    assert COURT_KEYPOINTS_M.shape == (10, 2)
+    assert COURT_KEYPOINTS_M.shape == (14, 2)
 
 
 def test_court_keypoints_symmetry():
