@@ -44,6 +44,11 @@ def _lookup(table: dict, key) -> int:
     return table.get(key, _UNK_IDX)
 
 
+def _norm_direction(value) -> str:
+    """Normalize a direction code to a vocab key ("" for missing)."""
+    return "" if value is None else str(value)
+
+
 # Torch-dependent classes live in a try block so the module imports in
 # environments without torch (pure-logic tests still see the vocab constants).
 try:
@@ -87,7 +92,7 @@ try:
                 torch.tensor(s_idx, dtype=torch.long),
                 torch.tensor(d_idx, dtype=torch.long),
                 torch.tensor(z_idx, dtype=torch.long),
-                torch.tensor(f_rows, dtype=torch.float32).reshape(len(rally), FLOAT_DIM),
+                torch.tensor(f_rows, dtype=torch.float32).reshape(len(f_rows), FLOAT_DIM),
             )
 
     def pad_batch(encoded: list):
@@ -187,9 +192,6 @@ try:
             ckpt = torch.load(path, map_location="cpu", weights_only=False)
             self.encoder.load_state_dict(ckpt["encoder"])
             self._calibrator = ckpt.get("calibrator")
-
-    def _norm_direction(value) -> str:
-        return "" if value is None else str(value)
 
 except ImportError:
     # torch not available — vocab constants still import; classes raise on use.

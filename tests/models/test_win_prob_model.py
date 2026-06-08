@@ -1,6 +1,5 @@
 """Tests for the win-probability model: tokenizer, padding, encoder, persistence."""
 
-import numpy as np
 import pytest
 
 from src.models.win_prob.model import (
