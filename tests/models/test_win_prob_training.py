@@ -103,6 +103,10 @@ def test_train_end_to_end(tmp_path):
     assert 0.0 <= metrics["brier"] <= 1.0
     assert metrics["log_loss"] > 0.0
     assert metrics["n_train"] > 0 and metrics["n_val"] > 0
+    # the isotonic calibrator must persist in the checkpoint (save contract)
+    import torch
+    ckpt = torch.load(model_path, weights_only=False)
+    assert ckpt.get("calibrator") is not None
 
 
 def test_train_saved_model_predicts_in_range(tmp_path):

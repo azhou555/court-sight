@@ -112,8 +112,6 @@ def _load_records(paths: list) -> list[dict]:
     return records
 
 
-# ── Entry point (TEMPORARY stub — replaced in Task 3) ───────────────────────────
-
 # ── Batching ────────────────────────────────────────────────────────────────────
 
 def _iter_batches(examples: list, batch_size: int, shuffle: bool, seed: int = 0):
@@ -236,6 +234,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--weight_decay", type=float, default=1e-2)
     parser.add_argument("--patience", type=int, default=8)
     args = parser.parse_args()
     train(
@@ -245,5 +244,6 @@ if __name__ == "__main__":
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
+        weight_decay=args.weight_decay,
         patience=args.patience,
     )
