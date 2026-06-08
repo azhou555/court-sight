@@ -109,6 +109,13 @@ in accuracy as more rally context accumulates.
 - **Serve dependency**: win probability on serve depends heavily on serve speed
   and placement, neither of which are tracked in V1. Include serve direction
   (body, T, wide) from charting data as a proxy.
+- **Current-shot landing-zone optimism**: each shot token includes its own
+  `ball_landing_zone`, but the bounce occurs *after* contact — at true inference
+  time the landing of the shot being evaluated is not yet known. The training
+  pipeline keeps this feature (it matches the token design above) but it makes
+  in-sample win-probability slightly optimistic for the current shot. A strictly
+  causal variant would mask the current shot's landing zone; deferred until it
+  measurably affects EV ranking.
 
 ## Output Schema
 
