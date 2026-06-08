@@ -85,3 +85,38 @@ def test_ece_perfectly_calibrated_is_low():
     probs = np.array([0.0, 0.0, 1.0, 1.0])
     labels = np.array([0.0, 0.0, 1.0, 1.0])
     assert expected_calibration_error(probs, labels) < 1e-6
+
+
+def _write(tmp_path, records) -> str:
+    path = tmp_path / "shots.json"
+    path.write_text(json.dumps(records))
+    return str(path)
+
+
+def test_train_end_to_end(tmp_path):
+    records = make_synthetic_records(n_points=40, shots_per_point=6)
+    records_path = _write(tmp_path, records)
+    model_path = train([records_path], output_dir=tmp_path / "ckpt",
+                       epochs=3, batch_size=16, patience=3)
+    assert model_path.exists()
+    metrics = json.loads((tmp_path / "ckpt" / "metrics.json").read_text())
+    assert 0.0 <= metrics["brier"] <= 1.0
+    assert metrics["log_loss"] > 0.0
+    assert metrics["n_train"] > 0 and metrics["n_val"] > 0
+
+
+def test_train_saved_model_predicts_in_range(tmp_path):
+    from src.models.win_prob.model import WinProbModel
+    records = make_synthetic_records(n_points=40, shots_per_point=6)
+    model_path = train([_write(tmp_path, records)], output_dir=tmp_path / "ckpt",
+                       epochs=3, batch_size=16, patience=3)
+    model = WinProbModel(str(model_path))
+    out = model.predict(records[:3])
+    assert 0.0 <= out["p_win_point"] <= 1.0
+
+
+def test_train_positions_off_runs(tmp_path):
+    records = make_synthetic_records(n_points=30, shots_per_point=5)
+    model_path = train([_write(tmp_path, records)], output_dir=tmp_path / "ckpt_off",
+                       epochs=2, batch_size=16, patience=2, positions_off=True)
+    assert model_path.exists()
