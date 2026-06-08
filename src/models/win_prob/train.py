@@ -68,7 +68,7 @@ def build_examples(records: list[dict], positions_off: bool = False) -> list:
     return examples
 
 
-def split_by_point(examples: list, val_frac: float = 0.2, seed: int = 42):
+def split_by_point(examples: list, val_frac: float = 0.2, seed: int = 42) -> tuple[list, list]:
     """Grouped split: all examples from one point land on the same side."""
     keys = sorted({e[2] for e in examples})
     rng = np.random.default_rng(seed)
@@ -77,6 +77,12 @@ def split_by_point(examples: list, val_frac: float = 0.2, seed: int = 42):
     val_keys = set(keys[:n_val])
     train_ex = [e for e in examples if e[2] not in val_keys]
     val_ex = [e for e in examples if e[2] in val_keys]
+    if not train_ex:
+        raise ValueError(
+            f"split_by_point produced an empty training set "
+            f"({len(keys)} unique point(s), val_frac={val_frac}). "
+            "Need at least 2 distinct points."
+        )
     return train_ex, val_ex
 
 
