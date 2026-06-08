@@ -38,7 +38,17 @@ def main() -> None:
             output_dir=args.out / "neutral_position",
         )
 
-    if args.model in ("shot_classifier", "execution_prob", "win_prob"):
+    if args.model in ("win_prob", "all"):
+        from src.models.win_prob.train import train as train_win_prob
+        record_paths = sorted(args.data.glob("*.json"))
+        if not record_paths:
+            raise FileNotFoundError(f"No ShotRecord JSON files found in {args.data}")
+        train_win_prob(
+            shot_record_paths=record_paths,
+            output_dir=args.out / "win_prob",
+        )
+
+    if args.model in ("shot_classifier", "execution_prob"):
         raise NotImplementedError(
             f"Dispatch for '{args.model}' not yet wired into this script. "
             f"Use the module's own train entrypoint."
