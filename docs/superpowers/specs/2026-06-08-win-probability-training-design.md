@@ -164,8 +164,9 @@ Single checkpoint dict: encoder `state_dict`, calibrator, vocab maps. A
 
 ### 3.7 Wiring
 
-Add `win_prob` to `scripts/train_models.py` choices and dispatch, matching the
-step-8 pattern.
+`scripts/train_models.py` already lists `win_prob` in its choices but its
+dispatch branch raises `NotImplementedError`. Replace that branch with a real
+dispatch calling `win_prob.train`, matching the step-8 pattern.
 
 ---
 
@@ -191,6 +192,6 @@ first to avoid the macOS OpenMP segfault — no change needed.
 |----------------------------------------|-----------------------------------------|
 | `src/models/win_prob/model.py`         | Repairs 2.1–2.5; token 42→43            |
 | `src/models/win_prob/train.py`         | **New** — full training pipeline        |
-| `scripts/train_models.py`              | Add `win_prob` choice + dispatch        |
+| `scripts/train_models.py`              | Replace `win_prob` NotImplementedError branch with real dispatch |
 | `tests/models/test_win_prob_training.py` | **New** — test suite (§4)             |
 | `docs/architecture/07_win_probability.md` | Note the §3.3 landing-zone optimism  |
