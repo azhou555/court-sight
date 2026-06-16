@@ -141,6 +141,7 @@ class EVScorer:
         self,
         actual_zone: str,
         base_safety_features: ShotGeometryFeatures,
+        base_response_features: ResponseDistributionFeatures,
         rally_context: list[dict],
         recovery_state: RecoveryState,
         striker_pos: np.ndarray,
@@ -157,14 +158,17 @@ class EVScorer:
             shot_type=recovery_state.shot_type,
         )
 
-        ev_surface = self.compute_ev_surface(
-            base_safety_features, rally_context, recovery_state,
-            striker_pos, striker_vel, t_recovery,
+        ev_surface = self.compute_ev_surface(base_safety_features, rally_context, dp)
+        neutrals = self.predict_zone_neutrals(
+            base_response_features, striker_pos, striker_vel, t_recovery,
         )
+        next_neutrals = {
+            z: [float(v[0]), float(v[1])] for z, v in neutrals.items()
+        }
 
-        # Base EV values (before displacement penalty)
+        # Base EV values (before displacement penalty); dp cancels in ev_loss.
         ev_actual_base = ev_surface[actual_zone] + dp
-        ev_best_zone = max(COURT_ZONES, key=lambda z: ev_surface[z] + dp)
+        ev_best_zone = max(COURT_ZONES, key=lambda z: ev_surface[z])
         ev_best_base = ev_surface[ev_best_zone] + dp
         ev_worst_base = min(ev_surface[z] + dp for z in COURT_ZONES)
 
@@ -191,9 +195,12 @@ class EVScorer:
                 ev_best_base, ev_surface[actual_zone], p_make,
             ),
             "feedback_position": _position_feedback(
-                dp, recovery_state.recovery_displacement_m
+                dp, recovery_state.recovery_displacement_m,
             ),
             "ev_surface": {z: round(v, 3) for z, v in ev_surface.items()},
+            "next_neutrals": next_neutrals,
+            "next_neutral_actual": next_neutrals[actual_zone],
+            "next_neutral_best": next_neutrals[ev_best_zone],
         }
 
 

@@ -113,3 +113,55 @@ def test_predict_zone_neutrals_one_per_zone():
     from src.models.ev_surface.scorer import ZONE_CENTERS
     for z in COURT_ZONES:
         assert abs(neutrals[z][0] - ZONE_CENTERS[z][0] * 0.5) < 1e-6
+
+
+def _recovery_state():
+    return RecoveryState(
+        contact_pos_m=np.array([1.0, 3.0]),
+        neutral_pos_m=np.array([0.0, 2.0]),
+        movement_vector=np.array([0.5, 0.0]),
+        shot_direction=np.array([0.0, 1.0]),
+        ball_pos_at_contact=np.array([1.0, 3.0]),
+        shot_type="forehand_groundstroke",
+        recovery_displacement_m=1.4,
+    )
+
+
+def _score(actual_zone, zone_pwin):
+    scorer = EVScorer(_FakeSafety(0.8), _FakeWinProb(zone_pwin), _FakeNeutral())
+    return scorer.score_shot(
+        actual_zone=actual_zone,
+        base_safety_features=_safety_features(),
+        base_response_features=_response_features(),
+        rally_context=[{"ball_landing_zone": "C_deep", "shot_type_mcp": "f"}],
+        recovery_state=_recovery_state(),
+        striker_pos=np.array([0.0, 2.0]),
+        striker_vel=np.array([0.0, 0.0]),
+        t_recovery=0.8,
+        shot_id="s1",
+    )
+
+
+def test_score_shot_picks_best_zone_and_attaches_all_neutrals():
+    zone_pwin = _uniform_pwin(0.3); zone_pwin["W_deep"] = 0.95
+    out = _score("T_short", zone_pwin)
+    assert out["best_zone"] == "W_deep"
+    assert out["shot_id"] == "s1"
+    assert len(out["next_neutrals"]) == 9
+    assert out["next_neutral_best"] == out["next_neutrals"]["W_deep"]
+    assert out["next_neutral_actual"] == out["next_neutrals"]["T_short"]
+    assert isinstance(out["next_neutrals"]["W_deep"], list) and len(out["next_neutrals"]["W_deep"]) == 2
+    assert 0.0 <= out["zone_score"] <= 1.0
+
+
+def test_score_shot_uniform_surface_zone_score_half():
+    """All zones equal EV → ev_range 0 → zone_score 0.5 fallback."""
+    out = _score("C_mid", _uniform_pwin(0.5))
+    assert out["zone_score"] == 0.5
+
+
+def test_score_shot_optimal_zone_scores_one():
+    zone_pwin = _uniform_pwin(0.3); zone_pwin["W_deep"] = 0.95
+    out = _score("W_deep", zone_pwin)        # actual == best
+    assert out["ev_loss"] == 0.0
+    assert out["zone_score"] == 1.0
