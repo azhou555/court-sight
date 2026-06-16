@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional
 import numpy as np
 
 from src.models.execution_prob.model import ShotSafetyModel, ShotGeometryFeatures
 from src.models.execution_prob.displacement import displacement_penalty
 from src.models.win_prob.model import WinProbModel
-from src.models.neutral_position.model import NeutralPositionModel
+from src.models.neutral_position.model import NeutralPositionModel, ResponseDistributionFeatures
 
 COURT_ZONES = [
     "T_deep",  "C_deep",  "W_deep",
@@ -95,43 +95,47 @@ class EVScorer:
         self,
         base_safety_features: ShotGeometryFeatures,
         rally_context: list[dict],
-        recovery_state: RecoveryState,
-        striker_pos: np.ndarray,
-        striker_vel: np.ndarray,
-        t_recovery: float,
+        dp: float = 0.0,
     ) -> dict[str, float]:
-        """
-        Compute EV for each zone. displacement_penalty is a constant offset
-        applied uniformly — it does not affect which zone is best.
-        """
-        dp = displacement_penalty(
-            contact_pos_m=recovery_state.contact_pos_m,
-            neutral_pos_m=recovery_state.neutral_pos_m,
-            movement_vector=recovery_state.movement_vector,
-            shot_direction=recovery_state.shot_direction,
-            ball_pos_at_contact=recovery_state.ball_pos_at_contact,
-            shot_type=recovery_state.shot_type,
-        )
-
+        """EV (adjusted) per zone. dp is a constant offset applied uniformly —
+        it does not change which zone is best."""
         ev_surface = {}
         for zone in COURT_ZONES:
             zone_center = ZONE_CENTERS[zone]
 
             # 2B: geometric margin for this hypothetical target zone
             zone_features = _build_zone_features(base_safety_features, zone_center)
-            safety = self.safety_model.predict(zone_features)
-            p_make = safety["p_make"]
+            p_make = self.safety_model.predict(zone_features)["p_make"]
 
-            # 2C: win probability — include where player would recover to after
-            # hitting this zone (affects opponent's response distribution)
+            # 2C: win probability given this zone was the landing target
             rally_with_zone = rally_context + [{"ball_landing_zone": zone}]
-            win = self.win_prob_model.predict(rally_with_zone)
-            p_win = win["p_win_point"]
+            p_win = self.win_prob_model.predict(rally_with_zone)["p_win_point"]
 
-            ev_base = compute_ev(p_make, p_win)
-            ev_surface[zone] = round(ev_base - dp, 4)
-
+            ev_surface[zone] = round(compute_ev(p_make, p_win) - dp, 4)
         return ev_surface
+
+    def predict_zone_neutrals(
+        self,
+        base_response_features: ResponseDistributionFeatures,
+        striker_pos: np.ndarray,
+        striker_vel: np.ndarray,
+        t_recovery: float,
+    ) -> dict[str, np.ndarray]:
+        """Per-zone reachable neutral (2E). Output-only — does NOT enter EV math.
+        For each zone, the player's landing is set to that zone's center."""
+        neutrals = {}
+        for zone in COURT_ZONES:
+            zone_center = ZONE_CENTERS[zone]
+            feats = replace(
+                base_response_features,
+                your_landing_x=float(zone_center[0]),
+                your_landing_y=float(zone_center[1]),
+            )
+            result = self.neutral_model.predict_neutral(
+                feats, striker_pos, striker_vel, t_recovery,
+            )
+            neutrals[zone] = result["reachable_neutral_m"]
+        return neutrals
 
     def score_shot(
         self,
@@ -197,7 +201,6 @@ def _build_zone_features(
     base: ShotGeometryFeatures, zone_center: np.ndarray
 ) -> ShotGeometryFeatures:
     """Rebuild margin features for a hypothetical target zone center."""
-    from dataclasses import replace
     lateral_margin = min(
         abs(zone_center[0] - (-4.115)),
         abs(zone_center[0] - 4.115),
