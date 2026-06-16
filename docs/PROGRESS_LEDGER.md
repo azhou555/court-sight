@@ -47,11 +47,16 @@ during steps 7–10; flagged here so it isn't assumed done.)
 - **Not implemented:** per-rally-position accuracy metric (optional polish).
 - Untrained on real data.
 
-### Step 10 — EV Surface (2D) — IN PROGRESS
-- Deferring **aggregate pattern analysis** (`group_shots_by`) to the application
-  layer (step 11+) — it has no consumer until the feedback UI exists.
-- Heatmap visualization belongs to step 11 (feedback layer), not here.
-- (Design in progress; this section will be finalized when the spec lands.)
+### Step 10 — EV Surface (2D) — DONE
+- `EVScorer` reworked into a tested combiner: `compute_ev_surface`,
+  `predict_zone_neutrals`, `score_shot`. EV = 2B×(2C+1)−1−dp.
+- 2E integration: neutral feeds the displacement penalty; all 9 per-zone
+  neutrals are attached to per-shot output (not the EV math).
+- Untrained (no real data) — EV values are placeholder scaffolding.
+- **No `ShotRecord → EVScorer` inference driver yet** (no data) — belongs to a
+  later wiring/inference step.
+- **Deferred:** aggregate pattern analysis → application layer (step 11+);
+  heatmap visualization → step 11.
 
 ### Step 11 — Feedback Visualization — not started
 - Will own: heatmap viz, shot-level overlay, and the deferred aggregate pattern
@@ -95,11 +100,10 @@ output for the step-11 feedback layer, without it entering the EV math.
 1. **ShotRecord contact vs landing** — `ball_contact_position_m` = where a shot was
    *struck*; `ball_landing_zone` = where it *lands*. Don't conflate when pairing
    consecutive shots (bit the 2E label; relevant to 2C/2D).
-2. **WinProb sparse-dict `positions_known` flag** — `WinProbModel.predict` sets
-   `positions_known=1.0` even when a shot dict has only `ball_landing_zone` (no
-   positions), which differs from the `positions_off` training path. The EV scorer
-   appends `{"ball_landing_zone": zone}` hypotheticals — this train/inference
-   mismatch must be addressed when real training data is assembled.
+2. **WinProb `positions_known` flag — RESOLVED (step 10).** `RallyTokenizer.encode_shot`
+   now sets `positions_known` per-shot: a shot lacking `striker_position_m` gets
+   flag 0.0 + zeroed positions even in the default path. The EV scorer's appended
+   `{"ball_landing_zone": zone}` hypotheticals are correctly flagged unknown.
 
 ---
 

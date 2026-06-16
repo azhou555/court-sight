@@ -94,19 +94,15 @@ def compute_ev_surface(state: GameState) -> dict[str, float]:
         safety = shot_safety_model.predict(state, zone_center)
         p_make = safety["p_make"]
 
-        # 2E: neutral position the player would target after hitting this zone
-        # feeds into the opponent's likely response distribution
-        next_neutral = neutral_model.predict_neutral(
-            your_landing=zone_center,
-            your_position=state.striker_position,
-        )
-
-        # 2C: win probability given this zone was hit and the resulting neutral
-        win = win_prob_model.predict(state.rally_context + [{
-            "ball_landing_zone": zone,
-            "next_neutral": next_neutral,
-        }])
+        # 2C: win probability given this zone was the landing target.
+        # NOTE: the win-prob token has no next_neutral slot, so 2E does NOT
+        # feed 2C. 2E enters the EV only via the displacement penalty (below).
+        win = win_prob_model.predict(state.rally_context + [{"ball_landing_zone": zone}])
         p_win = win["p_win_point"]
+
+        # 2E (output-only): the neutral the player would recover to after this
+        # zone, attached to the per-shot output for the feedback layer. Computed
+        # via predict_zone_neutrals; not part of the EV computation.
 
         ev_base = p_make * (p_win + 1.0) - 1.0
         ev_surface[zone] = ev_base - dp
