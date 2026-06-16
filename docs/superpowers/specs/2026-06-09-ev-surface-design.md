@@ -22,16 +22,16 @@ trained models' inference interfaces into:
 ### In scope
 - Rebuild `EVScorer.compute_ev_surface` and `score_shot` against the **real**
   model APIs.
-- Add `predict_zone_neutrals` — per-zone 2E neutral, attached to output for the
-  step-11 feedback layer (does NOT enter EV math).
+- Add `predict_zone_neutrals` — per-zone 2E neutral; **all 9** attached to output
+  for the step-11 feedback layer (does NOT enter EV math).
+- **Fix the win-prob `positions_known` mismatch** at its source (per-shot flag in
+  the tokenizer — see §5).
 - A real test suite for the combiner using lightweight fake models.
 
 ### Explicitly deferred
 - **Aggregate pattern analysis** (`group_shots_by`, systematic-weakness flags) →
   application layer (step 11+); no consumer exists yet.
 - **Heatmap visualization** → step 11 (feedback layer).
-- Strictly-correct positional input to win-prob for hypothetical zones (blocked on
-  real training data — see §5).
 
 ### Overarching caveat
 All three models are **untrained** (no real data — see `docs/PROGRESS_LEDGER.md`).
@@ -106,7 +106,8 @@ which is what enables fake-model testing.
    your_landing_y=zone_center[1])` → `neutral_model.predict_neutral(features,
    striker_pos, striker_vel, t_recovery)` → store `reachable_neutral_m`.
 4. `score_shot`: rank zones (dp cancels in `ev_loss`), compute `zone_score`,
-   select tiered feedback, attach actual + best zone `next_neutral`.
+   select tiered feedback, attach all 9 `next_neutrals` plus the actual/best
+   convenience pointers.
 
 ### Method boundaries (each independently testable)
 | Method | Returns | Responsibility |
@@ -130,19 +131,36 @@ Existing `score_shot` keys (`shot_id`, `actual_zone`, `ev_actual`,
 `ev_actual_base`, `ev_best_base`, `ev_loss`, `best_zone`, `zone_score`,
 `displacement_penalty`, `p_make_actual`, `feedback_zone`, `feedback_position`,
 `ev_surface`) PLUS:
-- `next_neutral_actual`: `reachable_neutral_m` for the actual zone (list[float]).
-- `next_neutral_best`: `reachable_neutral_m` for the best zone (list[float]).
+- `next_neutrals`: **all 9** zones → `reachable_neutral_m` as `list[float]`,
+  parallel to `ev_surface` (from `predict_zone_neutrals`).
+- `next_neutral_actual`: convenience pointer = `next_neutrals[actual_zone]`.
+- `next_neutral_best`: convenience pointer = `next_neutrals[best_zone]`.
 
 ---
 
-## 5. Known Limitation (documented, not silently inherited)
+## 5. Fix: per-shot `positions_known` flag (win-prob tokenizer)
 
 The per-zone 2C call appends `{"ball_landing_zone": zone}` — a sparse dict with no
-positions. Per `docs/PROGRESS_LEDGER.md` trap #2, `WinProbModel.predict` then sets
-`positions_known=1.0` with zeroed positions, a train/inference mismatch vs the
-`positions_off` path. Kept as-is for step 10 (matches the win-prob contract; model
-is untrained so values are placeholder). To be resolved when real training data is
-assembled. The spec records this rather than inheriting it silently.
+positions. Previously `RallyTokenizer.encode_shot` set `positions_known=1.0` for
+every shot in the default path (zeroing missing positions but still flagging them
+"known"), a train/inference mismatch (ledger trap #2).
+
+**Fix (in `src/models/win_prob/model.py`):** make `positions_known` a **per-shot**
+determination.
+- `positions_off=True` (pretrain regime): unchanged — ALL shots get zeroed
+  positions and flag 0.0.
+- `positions_off=False` (default): per shot, detect whether position data is
+  present. A shot **has positions** iff `striker_position_m` is present, non-None,
+  and length ≥ 2. If present → real positions + flag 1.0; if absent → zeroed
+  positions + flag 0.0.
+
+This correctly handles the scorer's mixed rally: real prior shots are flagged
+known, the appended hypothetical zone is flagged unknown. It does not change
+behavior for any shot that carries positions, so existing step-9 tests still pass;
+a new unit test covers the sparse-shot → flag 0.0 case.
+
+Downstream bookkeeping: mark ledger trap #2 resolved and update the
+`winprob-predict-positions-known-flag` memory.
 
 ---
 
@@ -158,10 +176,15 @@ Cases:
 - Best-zone selection picks the max-EV zone; `dp` cancels in `ev_loss`
   (vary `dp`, assert `ev_loss`/`zone_score` unchanged).
 - `zone_score` in [0,1]; `ev_range == 0` → 0.5 fallback.
-- `predict_zone_neutrals` returns a neutral per zone; `score_shot` attaches
-  `next_neutral_actual` / `next_neutral_best`.
+- `predict_zone_neutrals` returns a neutral for all 9 zones; `score_shot` attaches
+  `next_neutrals` (9) plus `next_neutral_actual` / `next_neutral_best` pointers.
 - Feedback-tier boundaries (`_get_tier`) and template selection per tier.
 - `_build_zone_features` sets the expected margin fields for a known zone center.
+
+Plus, in `tests/models/test_win_prob_model.py`: a shot dict with no
+`striker_position_m` yields `positions_known == 0.0` and zeroed positional floats
+in the default (`positions_off=False`) path, while a shot with positions yields
+`1.0` (guards the §5 fix).
 
 OpenMP note: importing the real models pulls torch; `tests/conftest.py` already
 imports xgboost first. Tests use fakes, but module import still loads the real
@@ -173,7 +196,10 @@ classes — no conftest change needed.
 
 | File | Change |
 |---|---|
-| `src/models/ev_surface/scorer.py` | Rework `EVScorer`; add `predict_zone_neutrals`; new output keys; `base_response_features` param |
+| `src/models/win_prob/model.py` | Per-shot `positions_known` detection in `RallyTokenizer.encode_shot` (§5) |
+| `tests/models/test_win_prob_model.py` | Add sparse-shot → `positions_known==0.0` test |
+| `src/models/ev_surface/scorer.py` | Rework `EVScorer`; add `predict_zone_neutrals`; new output keys (all 9 neutrals); `base_response_features` param |
 | `tests/models/test_ev_scorer.py` | Add combiner tests with fake models (keep existing pure-helper tests) |
 | `docs/architecture/08_ev_surface.md` | Correct the 2E-integration description (neutral→penalty + output attach, not next_neutral→2C) |
-| `docs/PROGRESS_LEDGER.md` | Finalize the step-10 section |
+| `docs/PROGRESS_LEDGER.md` | Finalize step-10 section; mark trap #2 resolved |
+| memory `winprob-predict-positions-known-flag` | Update to reflect the fix |
