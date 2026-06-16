@@ -64,16 +64,20 @@ try:
             dir_idx = _lookup(_DIR_IDX, _norm_direction(shot.get("direction_mcp")))
             zone_idx = _lookup(_ZONE_IDX, shot.get("ball_landing_zone"))
 
-            if positions_off:
+            sp_raw = shot.get("striker_position_m")
+            has_positions = sp_raw is not None and len(sp_raw) >= 2
+            if positions_off or not has_positions:
+                # pretrain regime (all shots) OR a shot that carries no position
+                # data (e.g. a hypothetical zone appended by the EV scorer):
+                # zero the positional features and flag them unknown.
                 positional = [0.0] * 9
                 known = 0.0
             else:
-                sp = shot.get("striker_position_m") or [0.0, 0.0]
                 sv = shot.get("striker_velocity_ms") or [0.0, 0.0]
                 op = shot.get("opponent_position_m") or [0.0, 0.0]
                 ov = shot.get("opponent_velocity_ms") or [0.0, 0.0]
                 co = float(shot.get("court_opening", 0.0))
-                positional = [float(sp[0]), float(sp[1]), float(sv[0]), float(sv[1]),
+                positional = [float(sp_raw[0]), float(sp_raw[1]), float(sv[0]), float(sv[1]),
                               float(op[0]), float(op[1]), float(ov[0]), float(ov[1]), co]
                 known = 1.0
 

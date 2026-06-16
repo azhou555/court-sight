@@ -126,3 +126,18 @@ def test_predict_ignores_point_outcome():
     win = model.predict([_shot(idx=0, outcome=1)])["p_win_point"]
     loss = model.predict([_shot(idx=0, outcome=0)])["p_win_point"]
     assert win == loss
+
+
+def test_tokenizer_missing_positions_flags_unknown():
+    """A shot dict with no positions → positions_known=0.0 + zeroed positions,
+    even in the default (positions_off=False) path. Guards the EV-scorer's
+    sparse hypothetical-zone shots."""
+    tok = RallyTokenizer()
+    sparse = {"ball_landing_zone": "C_deep"}            # no striker_position_m
+    _, _, _, floats = tok.encode_shot(sparse)           # positions_off defaults False
+    assert floats[10] == 0.0                            # positions_known flag
+    assert all(v == 0.0 for v in floats[:9])            # positional dims zeroed
+    # a shot WITH positions still flags known
+    _, _, _, f2 = tok.encode_shot(_shot())
+    assert f2[10] == 1.0
+    assert f2[:9] != [0.0] * 9
