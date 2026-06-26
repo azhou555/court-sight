@@ -2,7 +2,26 @@
 
 A living record of (1) what each step left undone, (2) how the steps connect, and
 (3) known integration traps. Update this whenever a step defers work or a wiring
-point changes. Last updated: 2026-06-09 (during step 10 brainstorming).
+point changes. Last updated: 2026-06-26 (step 1-6 audit + process_match.py wired).
+
+---
+
+## Step status at a glance
+
+| Step | Component | Inference | Tests | Notes |
+|------|-----------|-----------|-------|-------|
+| 1 | `scripts/process_match.py` (frame loop + wiring) | ✅ Done | — | Implemented 2026-06-26 |
+| 2 | Homography (`CourtHomographyEstimator`) | ✅ Real | Partial (utils only) | ~27% success on some hardcourt footage; tolerance tuning needed |
+| 3 | Player tracking (`PlayerTracker`) | ✅ Real | None | Needs YOLO + BoT-SORT weights at runtime |
+| 4 | Ball tracking (`BallTracker`) | ✅ Real | Partial (zone only) | Needs TrackNet weights at runtime |
+| 4b | Point boundary (`BoundaryDetector`) | ✅ Real | None | State machine over ball+player signals |
+| 5 | MCP alignment (`MCPAligner`) | ✅ Real | None | DTW over rally lengths; score OCR deferred |
+| 6 | Shot classifier (`ShotClassifierTCN`) | ⚠️ Model only | None | No training pipeline; pose not fed to aligner yet |
+| 7 | Shot safety (2B) | ✅ Arch done | ✅ Synthetic | Untrained on real data |
+| 8 | Neutral position (2E) | ✅ Stage-1 | ✅ Synthetic | Several placeholder values; untrained |
+| 9 | Win probability (2C) | ✅ Arch done | ✅ Synthetic | Untrained; two-corpus pretrain deferred |
+| 10 | EV surface (2D) | ✅ Done | ✅ Synthetic | Untrained; no inference driver yet |
+| 11 | Feedback visualization | ❌ Not started | — | Blocked on real data + trained models |
 
 ---
 
@@ -20,12 +39,44 @@ critical path that unblocks genuine evaluation of steps 7–10.
 
 ## Per-step deferred work
 
-### Steps 1–6 (data pipeline + shot classifier) — status to re-verify
-Components are scaffolded; an earlier note recorded "core CV inference
-unimplemented" for parts of the pipeline. Before relying on end-to-end data flow,
-verify: homography stability, player/ball tracking inference, point-boundary
-detection, and the MCP alignment producing real `ShotRecord`s. (Not audited
-during steps 7–10; flagged here so it isn't assumed done.)
+### Steps 1–6 (data pipeline + shot classifier) — audited 2026-06-26
+
+**Step 1 — `scripts/process_match.py` — DONE (implemented 2026-06-26)**
+- Frame loop reads video via OpenCV, buffers 3-frame windows for TrackNet.
+- Wires: homography → player tracker → ball tracker → boundary detector per frame.
+- Post-loop: MCPAligner.align() → ShotRecords → `shot_records.json` + `summary.json`.
+- Deferred: PoseExtractor not yet fed into the loop (waits on step 6 training).
+
+**Step 2 — Homography — implemented, tolerance not tuned**
+- `CourtHomographyEstimator.process_frame()`: real heatmap inference + RANSAC.
+- ~27% success rate noted on some hardcourt footage; channel ordering bug resolved.
+- Tests cover utilities only (`pixel_to_court`, keypoint shape), not inference.
+- Pretrained weights auto-download from Google Drive (`gdown` required).
+
+**Step 3 — Player tracking — implemented**
+- `PlayerTracker.process_frame()`: YOLO26m + BoT-SORT + ECC camera compensation.
+- Velocity via Savitzky-Golay + court-coordinate projection.
+- No unit tests; `scripts/verify_pipeline.py` visualizes output.
+
+**Step 4 — Ball tracking — implemented**
+- `BallTracker.process_frame()`: TrackNet heatmap inference + velocity extrapolation + bounce detection.
+- Tests cover zone classification only, not inference.
+- Pretrained weights auto-download; path configurable via `configs/pipeline.yaml`.
+
+**Step 4b — Point boundary detection — implemented**
+- `BoundaryDetector.process_frame()`: state machine (DEAD/LIVE/COOLDOWN) over ball visibility + player velocity.
+- No tests.
+
+**Step 5 — MCP alignment — implemented**
+- `MCPAligner.align()`: DTW over rally-length sequences → per-shot `ShotRecord`.
+- No tests.
+- Known deferred: score-based alignment (OCR) not implemented; DTW proxy is sufficient for unedited footage.
+
+**Step 6 — Shot classifier — model only, not trained**
+- `ShotClassifierTCN` (TCN on 30-frame pose windows): model defined, no training pipeline verified.
+- `PoseExtractor.process_player()`: YOLO-pose inference wired, but not yet called from `process_match.py`.
+- `striker_pose` field in `ShotRecord` remains `None` until step 6 training is complete.
+- No tests.
 
 ### Step 7 — Shot Margin Safety (2B)
 - Trained only on synthetic data (no real make/miss labels yet).

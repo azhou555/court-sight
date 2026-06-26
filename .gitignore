@@ -13,6 +13,7 @@ build/
 data/raw/
 data/processed/
 data/interim/
+data/external/matches/
 weights/
 *.pth
 *.pt
