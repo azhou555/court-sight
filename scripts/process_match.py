@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out",   required=True, type=Path)
     p.add_argument("--config", default="configs/pipeline.yaml", type=Path)
     p.add_argument("--device", default="cuda", choices=["cuda", "cpu", "mps"])
+    p.add_argument("--max-frames", type=int, default=None, help="Stop after N frames (for testing)")
     return p.parse_args()
 
 
@@ -69,7 +70,9 @@ def main() -> None:
 
     fps = cap.get(cv2.CAP_PROP_FPS) or cfg["fps"]
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    print(f"Processing {args.video.name}: {total} frames @ {fps:.1f} fps")
+    if args.max_frames:
+        total = min(total, args.max_frames)
+    print(f"Processing {args.video.name}: {total} frames @ {fps:.1f} fps", flush=True)
 
     ball_tracks = []
     player_tracks = []
@@ -78,7 +81,7 @@ def main() -> None:
     frame_buf: deque = deque(maxlen=3)
     frame_idx = 0
 
-    while True:
+    while args.max_frames is None or frame_idx < args.max_frames:
         ok, frame = cap.read()
         if not ok:
             break
@@ -111,7 +114,7 @@ def main() -> None:
             point_segments.append(completed)
 
         if frame_idx % 500 == 0:
-            print(f"  frame {frame_idx}/{total}  points={len(point_segments)}")
+            print(f"  frame {frame_idx}/{total}  points={len(point_segments)}", flush=True)
         frame_idx += 1
 
     cap.release()
