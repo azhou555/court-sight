@@ -14,7 +14,28 @@ from collections import deque
 from pathlib import Path
 
 import cv2
+import numpy as np
 import yaml
+
+# HSV ranges (OpenCV: H 0-180, S 0-255, V 0-255) for each surface type.
+# Used by the frame gate to detect broadcast wide-angle court view.
+_COURT_HSV = {
+    "hard":  (np.array([ 95,  40,  60], np.uint8), np.array([135, 220, 210], np.uint8)),
+    "clay":  (np.array([  5,  80,  80], np.uint8), np.array([ 25, 255, 210], np.uint8)),
+    "grass": (np.array([ 35,  40,  60], np.uint8), np.array([ 80, 220, 210], np.uint8)),
+}
+# Frames to stay active after court color disappears (handles brief close-ups mid-rally).
+_GATE_KEEPALIVE = 90  # ~3 sec at 30 fps
+
+
+def _court_visible(frame: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> bool:
+    """True when court surface color spans the middle third of the frame horizontally."""
+    small = cv2.resize(frame, (160, 90))
+    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, lo, hi)
+    mid = mask[30:60]  # middle vertical third
+    row_coverage = np.mean(mid > 0, axis=1)
+    return bool(np.mean(row_coverage > 0.35) > 0.5)
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,6 +46,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--config", default="configs/pipeline.yaml", type=Path)
     p.add_argument("--device", default="cuda", choices=["cuda", "cpu", "mps"])
     p.add_argument("--max-frames", type=int, default=None, help="Stop after N frames (for testing)")
+    p.add_argument("--surface", default="hard", choices=["hard", "clay", "grass"],
+                   help="Court surface type for frame gate color filter")
     return p.parse_args()
 
 
@@ -74,6 +97,22 @@ def main() -> None:
         total = min(total, args.max_frames)
     print(f"Processing {args.video.name}: {total} frames @ {fps:.1f} fps", flush=True)
 
+    from src.pipeline.ball.tracker import BallTrackResult
+    from src.pipeline.tracking.player_tracker import PlayerTrackResult
+
+    def _empty_ball(idx: int) -> BallTrackResult:
+        return BallTrackResult(
+            frame_idx=idx, position_px=None, position_m=None,
+            confidence=0.0, is_bounce=False, bounce_zone=None, trajectory_segment=0,
+        )
+
+    def _empty_players(idx: int) -> PlayerTrackResult:
+        return PlayerTrackResult(frame_idx=idx, near_player=None, far_player=None)
+
+    hsv_lo, hsv_hi = _COURT_HSV[args.surface]
+    gate_keepalive = 0
+    skipped = 0
+
     ball_tracks = []
     player_tracks = []
     point_segments = []
@@ -89,24 +128,30 @@ def main() -> None:
         frame_buf.append(frame)
 
         h_result = homography.process_frame(frame, frame_idx)
-        H = h_result.H if h_result.H is not None else None
+        H = h_result.H
 
-        p_result = players.process_frame(frame, frame_idx, H)
-        player_tracks.append(p_result)
+        # Frame gate: skip expensive tracking on non-court frames (replays, close-ups, crowd)
+        if _court_visible(frame, hsv_lo, hsv_hi):
+            gate_keepalive = _GATE_KEEPALIVE
+        elif gate_keepalive > 0:
+            gate_keepalive -= 1
+        # Also deactivate immediately when homography re-estimated and found nothing
+        if not h_result.camera_angle_valid and gate_keepalive == _GATE_KEEPALIVE:
+            gate_keepalive = 0
+        is_active = gate_keepalive > 0
 
-        if len(frame_buf) == 3:
-            b_result = ball.process_frame(tuple(frame_buf), frame_idx, H)
+        if is_active:
+            p_result = players.process_frame(frame, frame_idx, H)
+            if len(frame_buf) == 3:
+                b_result = ball.process_frame(tuple(frame_buf), frame_idx, H)
+            else:
+                b_result = _empty_ball(frame_idx)
         else:
-            from src.pipeline.ball.tracker import BallTrackResult
-            b_result = BallTrackResult(
-                frame_idx=frame_idx,
-                position_px=None,
-                position_m=None,
-                confidence=0.0,
-                is_bounce=False,
-                bounce_zone=None,
-                trajectory_segment=0,
-            )
+            p_result = _empty_players(frame_idx)
+            b_result = _empty_ball(frame_idx)
+            skipped += 1
+
+        player_tracks.append(p_result)
         ball_tracks.append(b_result)
 
         completed = boundary.process_frame(frame_idx, b_result, p_result)
@@ -114,7 +159,8 @@ def main() -> None:
             point_segments.append(completed)
 
         if frame_idx % 500 == 0:
-            print(f"  frame {frame_idx}/{total}  points={len(point_segments)}", flush=True)
+            pct_skipped = 100 * skipped / max(frame_idx, 1)
+            print(f"  frame {frame_idx}/{total}  points={len(point_segments)}  skipped={pct_skipped:.0f}%", flush=True)
         frame_idx += 1
 
     cap.release()
@@ -143,6 +189,8 @@ def main() -> None:
         "mcp": str(args.mcp),
         "fps": fps,
         "total_frames": frame_idx,
+        "frames_skipped": skipped,
+        "skip_pct": round(100 * skipped / max(frame_idx, 1), 1),
         "points_detected": len(point_segments),
         "shots_aligned": len(records),
     }
