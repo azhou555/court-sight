@@ -1,0 +1,15 @@
+{
+  "n_train": 848,
+  "n_eval": 213,
+  "best_iter_x": 44,
+  "best_iter_y": 33,
+  "mae_x": 1.719436764717102,
+  "mae_y": 5.772431373596191,
+  "rmse_x": 1.9933422257576965,
+  "rmse_y": 6.285928834003161,
+  "sigma_x": 1.9793211573362353,
+  "sigma_y": 6.285728175342083,
+  "n_pairs": 1061,
+  "n_skipped_no_features": 40,
+  "n_skipped_no_label": 11
+}

@@ -7,10 +7,8 @@ scipy>=1.12
 ultralytics>=8.2        # YOLOv8
 boxmot>=10.0            # ByteTrack wrapper
 
-# Pose estimation
-mmpose>=1.3
-mmengine>=0.10
-mmcv>=2.1
+# Pose estimation: yolo26m-pose.pt (ultralytics, below) replaced RTMPose/mmpose
+# to avoid the mmpose/mmcv/mmengine install stack. See src/pipeline/pose/extractor.py.
 
 # Deep learning
 torch>=2.2

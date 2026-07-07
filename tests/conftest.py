@@ -1,11 +1,12 @@
 """Pytest session setup.
 
-Import xgboost before any test module loads torch. On macOS/conda, if torch's
-OpenMP runtime (libomp) initialises before xgboost's, xgboost segfaults during
-DMatrix construction in fit(). Loading xgboost first lets its runtime bind
-cleanly, after which torch can coexist in the same process. conftest.py is
-imported during collection, ahead of the test modules, so this ordering holds
-for the whole session.
+torch and xgboost each bundle their own OpenMP runtime; on Apple Silicon,
+whichever one runs a parallel op second segfaults regardless of import
+order. Pinning to a single OpenMP thread avoids both libraries touching
+their thread pools, which sidesteps the conflict. Must be set before either
+is imported, so it lives here in conftest.py (collected before test modules).
 """
 
-import xgboost  # noqa: F401
+import os
+
+os.environ.setdefault("OMP_NUM_THREADS", "1")

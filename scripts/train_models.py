@@ -2,7 +2,7 @@
 Train all models in development order.
 
 Usage:
-    python scripts/train_models.py \
+    python -m scripts.train_models \
         --data data/processed/ \
         --model shot_classifier \
         --config configs/training.yaml
@@ -30,7 +30,7 @@ def main() -> None:
 
     if args.model in ("neutral_position", "all"):
         from src.models.neutral_position.train import train as train_neutral_position
-        record_paths = sorted(args.data.glob("*.json"))
+        record_paths = sorted(args.data.rglob("shot_records.json"))
         if not record_paths:
             raise FileNotFoundError(f"No ShotRecord JSON files found in {args.data}")
         train_neutral_position(
@@ -40,7 +40,7 @@ def main() -> None:
 
     if args.model in ("win_prob", "all"):
         from src.models.win_prob.train import train as train_win_prob
-        record_paths = sorted(args.data.glob("*.json"))
+        record_paths = sorted(args.data.rglob("shot_records.json"))
         if not record_paths:
             raise FileNotFoundError(f"No ShotRecord JSON files found in {args.data}")
         train_win_prob(

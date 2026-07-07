@@ -6,11 +6,18 @@ Usage:
         --video path/to/match.mp4 \
         --mcp   path/to/match_charting.csv \
         --out   data/processed/match_id/
+
+Long matches checkpoint automatically: a checkpoint.json is written to --out
+after every completed point (a clean state-machine boundary — see
+BoundaryDetector, whose state resets to DEAD there) and re-running the same
+command resumes from it. Pass --restart to ignore an existing checkpoint and
+start over.
 """
 
 import argparse
 import json
 from collections import deque
+from dataclasses import asdict
 from pathlib import Path
 
 import cv2
@@ -48,12 +55,138 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-frames", type=int, default=None, help="Stop after N frames (for testing)")
     p.add_argument("--surface", default="hard", choices=["hard", "clay", "grass"],
                    help="Court surface type for frame gate color filter")
+    p.add_argument("--restart", action="store_true",
+                   help="Ignore any existing checkpoint.json in --out and start over")
     return p.parse_args()
+
+
+# --- Checkpointing ------------------------------------------------------
+# Only ball/player track results and point boundaries need to survive a
+# restart: homography and the boundary detector are safe to reconstruct
+# fresh at a completed-point boundary (BoundaryDetector resets to its
+# default DEAD state there; homography re-estimates from scratch on the
+# next frame regardless of history).
+
+def _ser_ball(b) -> dict:
+    return {
+        "frame_idx": b.frame_idx,
+        "position_px": b.position_px.tolist() if b.position_px is not None else None,
+        "position_m": b.position_m.tolist() if b.position_m is not None else None,
+        "confidence": b.confidence,
+        "is_bounce": b.is_bounce,
+        "bounce_zone": b.bounce_zone,
+        "trajectory_segment": b.trajectory_segment,
+        "interpolated": b.interpolated,
+    }
+
+
+def _deser_ball(d: dict):
+    from src.pipeline.ball.tracker import BallTrackResult
+    return BallTrackResult(
+        frame_idx=d["frame_idx"],
+        position_px=np.array(d["position_px"]) if d["position_px"] is not None else None,
+        position_m=np.array(d["position_m"]) if d["position_m"] is not None else None,
+        confidence=d["confidence"],
+        is_bounce=d["is_bounce"],
+        bounce_zone=d["bounce_zone"],
+        trajectory_segment=d["trajectory_segment"],
+        interpolated=d.get("interpolated", False),
+    )
+
+
+def _ser_player_state(s) -> dict | None:
+    if s is None:
+        return None
+    return {
+        "track_id": s.track_id,
+        "bbox_px": s.bbox_px.tolist(),
+        "position_m": s.position_m.tolist(),
+        "velocity_ms": s.velocity_ms.tolist(),
+        "confidence": s.confidence,
+    }
+
+
+def _deser_player_state(d: dict | None):
+    if d is None:
+        return None
+    from src.pipeline.tracking.player_tracker import PlayerState
+    return PlayerState(
+        track_id=d["track_id"],
+        bbox_px=np.array(d["bbox_px"]),
+        position_m=np.array(d["position_m"]),
+        velocity_ms=np.array(d["velocity_ms"]),
+        confidence=d["confidence"],
+    )
+
+
+def _ser_player(p) -> dict:
+    return {
+        "frame_idx": p.frame_idx,
+        "near_player": _ser_player_state(p.near_player),
+        "far_player": _ser_player_state(p.far_player),
+    }
+
+
+def _deser_player(d: dict):
+    from src.pipeline.tracking.player_tracker import PlayerTrackResult
+    return PlayerTrackResult(
+        frame_idx=d["frame_idx"],
+        near_player=_deser_player_state(d["near_player"]),
+        far_player=_deser_player_state(d["far_player"]),
+    )
+
+
+def _write_checkpoint(path: Path, *, next_frame, skipped, gate_keepalive,
+                       point_counter, ball_tracks, player_tracks, point_segments,
+                       homography) -> None:
+    data = {
+        "next_frame": next_frame,
+        "skipped": skipped,
+        "gate_keepalive": gate_keepalive,
+        "point_counter": point_counter,
+        "ball_tracks": [_ser_ball(b) for b in ball_tracks],
+        "player_tracks": [_ser_player(p) for p in player_tracks],
+        "point_segments": [asdict(s) for s in point_segments],
+        # Carry the re-estimation schedule forward so a fresh estimator
+        # doesn't force an off-cycle re-estimate right at the resume frame
+        # (that shift was measured to perturb projected positions by
+        # sub-mm — enough to flip a shot's zone right at a boundary).
+        "homography_last_frame": homography._last_frame,
+        "homography_last_H": (
+            homography._last_H.tolist() if homography._last_H is not None else None
+        ),
+    }
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data))
+    tmp.replace(path)  # atomic — never leaves a half-written checkpoint
+
+
+def _load_checkpoint(path: Path) -> dict:
+    from src.pipeline.events.boundary_detector import PointSegment
+    raw = json.loads(path.read_text())
+    return {
+        "next_frame": raw["next_frame"],
+        "skipped": raw["skipped"],
+        "gate_keepalive": raw["gate_keepalive"],
+        "point_counter": raw["point_counter"],
+        "ball_tracks": [_deser_ball(b) for b in raw["ball_tracks"]],
+        "player_tracks": [_deser_player(p) for p in raw["player_tracks"]],
+        "point_segments": [PointSegment(**s) for s in raw["point_segments"]],
+        "homography_last_frame": raw["homography_last_frame"],
+        "homography_last_H": (
+            np.array(raw["homography_last_H"]) if raw["homography_last_H"] is not None else None
+        ),
+    }
 
 
 def main() -> None:
     args = parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
+
+    checkpoint_path = args.out / "checkpoint.json"
+    if args.restart and checkpoint_path.exists():
+        checkpoint_path.unlink()
+    checkpoint = _load_checkpoint(checkpoint_path) if checkpoint_path.exists() else None
 
     cfg = yaml.safe_load(args.config.read_text())["pipeline"]
 
@@ -86,6 +219,10 @@ def main() -> None:
     )
 
     boundary = BoundaryDetector(fps=cfg["fps"])
+    if checkpoint is not None:
+        boundary._point_counter = checkpoint["point_counter"]
+        homography._last_frame = checkpoint["homography_last_frame"]
+        homography._last_H = checkpoint["homography_last_H"]
 
     cap = cv2.VideoCapture(str(args.video))
     if not cap.isOpened():
@@ -110,15 +247,26 @@ def main() -> None:
         return PlayerTrackResult(frame_idx=idx, near_player=None, far_player=None)
 
     hsv_lo, hsv_hi = _COURT_HSV[args.surface]
-    gate_keepalive = 0
-    skipped = 0
 
-    ball_tracks = []
-    player_tracks = []
-    point_segments = []
+    if checkpoint is not None:
+        gate_keepalive = checkpoint["gate_keepalive"]
+        skipped = checkpoint["skipped"]
+        ball_tracks = checkpoint["ball_tracks"]
+        player_tracks = checkpoint["player_tracks"]
+        point_segments = checkpoint["point_segments"]
+        frame_idx = checkpoint["next_frame"]
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        print(f"Resuming from checkpoint at frame {frame_idx} "
+              f"({len(point_segments)} points already detected)", flush=True)
+    else:
+        gate_keepalive = 0
+        skipped = 0
+        ball_tracks = []
+        player_tracks = []
+        point_segments = []
+        frame_idx = 0
 
     frame_buf: deque = deque(maxlen=3)
-    frame_idx = 0
 
     while args.max_frames is None or frame_idx < args.max_frames:
         ok, frame = cap.read()
@@ -157,6 +305,17 @@ def main() -> None:
         completed = boundary.process_frame(frame_idx, b_result, p_result)
         if completed is not None:
             point_segments.append(completed)
+            _write_checkpoint(
+                checkpoint_path,
+                next_frame=frame_idx + 1,
+                skipped=skipped,
+                gate_keepalive=gate_keepalive,
+                point_counter=boundary._point_counter,
+                ball_tracks=ball_tracks,
+                player_tracks=player_tracks,
+                point_segments=point_segments,
+                homography=homography,
+            )
 
         if frame_idx % 500 == 0:
             pct_skipped = 100 * skipped / max(frame_idx, 1)
@@ -195,6 +354,7 @@ def main() -> None:
         "shots_aligned": len(records),
     }
     (args.out / "summary.json").write_text(json.dumps(summary, indent=2))
+    checkpoint_path.unlink(missing_ok=True)
 
     print(f"Done. {len(records)} shots → {out_path}")
 
