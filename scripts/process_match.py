@@ -136,16 +136,21 @@ def _deser_player(d: dict):
     )
 
 
+# Per-frame ball/player tracks are append-only JSONL, not part of checkpoint.json:
+# re-serializing the whole match's accumulated history on every completed-point
+# checkpoint made a long match's checkpoint cost grow quadratically with frame count.
+
+def _tracks_paths(out_dir: Path) -> tuple[Path, Path]:
+    return out_dir / "ball_tracks.jsonl", out_dir / "player_tracks.jsonl"
+
+
 def _write_checkpoint(path: Path, *, next_frame, skipped, gate_keepalive,
-                       point_counter, ball_tracks, player_tracks, point_segments,
-                       homography) -> None:
+                       point_counter, point_segments, homography) -> None:
     data = {
         "next_frame": next_frame,
         "skipped": skipped,
         "gate_keepalive": gate_keepalive,
         "point_counter": point_counter,
-        "ball_tracks": [_ser_ball(b) for b in ball_tracks],
-        "player_tracks": [_ser_player(p) for p in player_tracks],
         "point_segments": [asdict(s) for s in point_segments],
         # Carry the re-estimation schedule forward so a fresh estimator
         # doesn't force an off-cycle re-estimate right at the resume frame
@@ -161,16 +166,27 @@ def _write_checkpoint(path: Path, *, next_frame, skipped, gate_keepalive,
     tmp.replace(path)  # atomic — never leaves a half-written checkpoint
 
 
-def _load_checkpoint(path: Path) -> dict:
+def _load_checkpoint(path: Path, out_dir: Path) -> dict:
     from src.pipeline.events.boundary_detector import PointSegment
     raw = json.loads(path.read_text())
+    next_frame = raw["next_frame"]
+
+    # Tracks are appended one JSON line per frame; a crash mid-append can leave
+    # a trailing partial line, so read only the `next_frame` lines the
+    # checkpoint vouches for and discard anything after.
+    ball_path, player_path = _tracks_paths(out_dir)
+    ball_tracks = [_deser_ball(json.loads(l)) for l in
+                   ball_path.read_text().splitlines()[:next_frame]]
+    player_tracks = [_deser_player(json.loads(l)) for l in
+                      player_path.read_text().splitlines()[:next_frame]]
+
     return {
-        "next_frame": raw["next_frame"],
+        "next_frame": next_frame,
         "skipped": raw["skipped"],
         "gate_keepalive": raw["gate_keepalive"],
         "point_counter": raw["point_counter"],
-        "ball_tracks": [_deser_ball(b) for b in raw["ball_tracks"]],
-        "player_tracks": [_deser_player(p) for p in raw["player_tracks"]],
+        "ball_tracks": ball_tracks,
+        "player_tracks": player_tracks,
         "point_segments": [PointSegment(**s) for s in raw["point_segments"]],
         "homography_last_frame": raw["homography_last_frame"],
         "homography_last_H": (
@@ -184,9 +200,12 @@ def main() -> None:
     args.out.mkdir(parents=True, exist_ok=True)
 
     checkpoint_path = args.out / "checkpoint.json"
+    ball_path, player_path = _tracks_paths(args.out)
     if args.restart and checkpoint_path.exists():
         checkpoint_path.unlink()
-    checkpoint = _load_checkpoint(checkpoint_path) if checkpoint_path.exists() else None
+        ball_path.unlink(missing_ok=True)
+        player_path.unlink(missing_ok=True)
+    checkpoint = _load_checkpoint(checkpoint_path, args.out) if checkpoint_path.exists() else None
 
     cfg = yaml.safe_load(args.config.read_text())["pipeline"]
 
@@ -268,6 +287,18 @@ def main() -> None:
 
     frame_buf: deque = deque(maxlen=3)
 
+    if checkpoint is not None:
+        # A crash can leave lines appended past what checkpoint.json vouches
+        # for; truncate back to exactly `next_frame` lines before resuming
+        # appends, or we'd duplicate/desync the log against frame_idx.
+        ball_path.write_text("".join(l + "\n" for l in
+                              ball_path.read_text().splitlines()[:frame_idx]))
+        player_path.write_text("".join(l + "\n" for l in
+                                player_path.read_text().splitlines()[:frame_idx]))
+
+    ball_f = open(ball_path, "a")
+    player_f = open(player_path, "a")
+
     while args.max_frames is None or frame_idx < args.max_frames:
         ok, frame = cap.read()
         if not ok:
@@ -301,18 +332,20 @@ def main() -> None:
 
         player_tracks.append(p_result)
         ball_tracks.append(b_result)
+        ball_f.write(json.dumps(_ser_ball(b_result)) + "\n")
+        player_f.write(json.dumps(_ser_player(p_result)) + "\n")
 
         completed = boundary.process_frame(frame_idx, b_result, p_result)
         if completed is not None:
             point_segments.append(completed)
+            ball_f.flush()
+            player_f.flush()
             _write_checkpoint(
                 checkpoint_path,
                 next_frame=frame_idx + 1,
                 skipped=skipped,
                 gate_keepalive=gate_keepalive,
                 point_counter=boundary._point_counter,
-                ball_tracks=ball_tracks,
-                player_tracks=player_tracks,
                 point_segments=point_segments,
                 homography=homography,
             )
@@ -323,6 +356,8 @@ def main() -> None:
         frame_idx += 1
 
     cap.release()
+    ball_f.close()
+    player_f.close()
 
     # flush any open point
     if boundary._state.name != "DEAD":
@@ -355,6 +390,8 @@ def main() -> None:
     }
     (args.out / "summary.json").write_text(json.dumps(summary, indent=2))
     checkpoint_path.unlink(missing_ok=True)
+    ball_path.unlink(missing_ok=True)
+    player_path.unlink(missing_ok=True)
 
     print(f"Done. {len(records)} shots → {out_path}")
 

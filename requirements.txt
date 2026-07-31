@@ -5,7 +5,7 @@ scipy>=1.12
 
 # Object detection + tracking
 ultralytics>=8.2        # YOLOv8
-boxmot>=10.0            # ByteTrack wrapper
+boxmot==20.0.0          # pinned: >=21 dropped the boxmot.trackers.BotSort re-export
 
 # Pose estimation: yolo26m-pose.pt (ultralytics, below) replaced RTMPose/mmpose
 # to avoid the mmpose/mmcv/mmengine install stack. See src/pipeline/pose/extractor.py.
