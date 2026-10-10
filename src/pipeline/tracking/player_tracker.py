@@ -61,14 +61,25 @@ class PlayerTracker:
         from ultralytics import YOLO
         self._detector = YOLO(model_path)
 
-        from boxmot.trackers import BotSort
+        try:
+            from boxmot import BotSort  # boxmot >= 21 (top-level only)
+        except ImportError:
+            from boxmot.trackers import BotSort  # boxmot <= 20
+        # ponytail: with_reid was renamed use_embeddings in boxmot 21; **kwargs
+        # swallows the wrong one silently, so pick by signature.
+        import inspect
+        disable_reid = (
+            {"with_reid": False}
+            if "with_reid" in inspect.signature(BotSort.__init__).parameters
+            else {"use_embeddings": False}
+        )
         self._tracker = BotSort(
-            with_reid=False,
             cmc_method="ecc",
             frame_rate=int(fps),
             track_high_thresh=detection_threshold,
             new_track_thresh=detection_threshold + 0.1,
             track_buffer=30,
+            **disable_reid,
         )
 
     def process_frame(
